@@ -95,8 +95,8 @@ steps are detected and skipped.
    DECtalk is downloaded from <https://github.com/dectalk/dectalk> and
    built for the machine it runs on (for example arm64 on a Raspberry Pi 4
    or 5, or amd64 on a PC). It is installed in `/opt/dectalk`, and
-   `/usr/local/bin/say` is linked to it. The build can take 10 minutes or
-   more on a Raspberry Pi. It is done in `/usr/local/src/dectalk-build`
+   `/usr/local/bin/say` is linked to it. Only US English is built, which
+   takes a minute or two on a Raspberry Pi. It is done in `/usr/local/src/dectalk-build`
    because `/tmp` is too small on many Pis, and that folder is removed
    afterwards.
 3. **Installs ffmpeg and perl** if they are missing.

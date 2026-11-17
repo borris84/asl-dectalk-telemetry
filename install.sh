@@ -197,6 +197,51 @@ nodenames_configured() {
 
 # --- Step 1: DECtalk -------------------------------------------------------
 
+# assemble_dectalk SRC DEST  - copy what say needs from a US English build
+# in SRC (dectalk/src) into DEST, laid out as upstream's "make install"
+# would: say, lib/libtts.so (which loads lib/libtts_<language>.so),
+# dic/dtalk_us.dic, DECtalk.conf and the documentation. Build folders are
+# named after the kernel version, hence the globs.
+assemble_dectalk() {
+    local src=$1 dest=$2 f
+    local -a files=(
+        "755 . samplosf/build/dtsamples/*/us/release/say"
+        "755 lib dtalkml/build/*/us/release/libtts.so"
+        "755 lib dapi/build/dectalk/*/us/release/libtts_us.so"
+        "644 dic dapi/build/dic/*/us/release/dtalk_us.dic"
+    )
+    local mode dir pattern
+    local -a found
+
+    rm -rf -- "$dest"
+    mkdir -p -- "$dest/lib" "$dest/dic" "$dest/doc/DECtalk" || return 1
+    for f in "${files[@]}"; do
+        read -r mode dir pattern <<< "$f"
+        # shellcheck disable=SC2206 # the glob is meant to expand
+        found=($src/$pattern)
+        if (( ${#found[@]} != 1 )) || [[ ! -f ${found[0]} ]]; then
+            echo "Not found in the build: $pattern" >&2
+            return 1
+        fi
+        install -m "$mode" -- "${found[0]}" "$dest/$dir/" || return 1
+    done
+
+    # The license key and US English lines of the DECtalk.conf that
+    # upstream's install target writes.
+    sed -nE 's/^[[:space:]]*echo "((licenses|licensepassword|US_dict|US_udict|Default_lang):[^"]*|LANG:us,[^"]*)".*/\1/p' \
+        "$src/Makefile" > "$dest/DECtalk.conf" || return 1
+    if ! grep -q '^licenses:' "$dest/DECtalk.conf" || ! grep -q '^US_dict:' "$dest/DECtalk.conf"; then
+        echo "Could not read the DECtalk.conf settings from $src/Makefile" >&2
+        return 1
+    fi
+
+    for f in pdf html man; do
+        [[ -d $src/docsosf/$f ]] && cp -r -- "$src/docsosf/$f" "$dest/doc/DECtalk/"
+    done
+    [[ -f $src/kitosf/kitbld/README ]] && install -m 644 -- "$src/kitosf/kitbld/README" "$dest/"
+    return 0
+}
+
 install_dectalk() {
     local jobs mem_mb dist log="$BUILD_DIR/build.log"
 
@@ -219,23 +264,24 @@ install_dectalk() {
     (( jobs > mem_mb / 512 )) && jobs=$(( mem_mb / 512 ))
     (( jobs < 1 )) && jobs=1
 
-    # Audio output is disabled: the scripts only write audio to files, and
-    # this keeps libtts free of ALSA/PulseAudio dependencies.
-    echo "Building DECtalk for $(uname -m) with $jobs job(s)."
-    echo "This can take 10 minutes or more on a Raspberry Pi. Build log: $log"
+    # Only US English is built: the scripts need nothing else, and the
+    # default build compiles all six languages, taking about six times as
+    # long. Audio output is disabled: the scripts only write audio to
+    # files, and this keeps libtts free of ALSA/PulseAudio dependencies.
+    echo "Building DECtalk (US English) for $(uname -m) with $jobs job(s)."
+    echo "This takes a few minutes on a Raspberry Pi. Build log: $log"
     if ! ( cd "$BUILD_DIR/dectalk/src" \
             && ./autogen.sh \
             && ./configure --prefix="$DECTALK_DIR" --disable-audio \
-            && make -j "$jobs" ) > "$log" 2>&1; then
+            && make -j "$jobs" english_release ) > "$log" 2>&1; then
         echo "The DECtalk build failed. Last lines of the build log:" >&2
         tail -n 20 "$log" >&2
         die "DECtalk build failed. The full log is in $log"
     fi
 
-    dist="$BUILD_DIR/dectalk/dist"
-    if [[ ! -x $dist/say || ! -f $dist/lib/libtts.so ]]; then
-        die "The build finished but $dist does not contain say and lib/libtts.so. See $log"
-    fi
+    dist="$BUILD_DIR/dist"
+    assemble_dectalk "$BUILD_DIR/dectalk/src" "$dist" \
+        || die "The build finished but its files could not be collected. See $log"
 
     if [[ -e $DECTALK_DIR ]]; then
         mv -- "$DECTALK_DIR" "$DECTALK_DIR.bak-$STAMP" || die "Could not move the old $DECTALK_DIR aside"
