@@ -1,6 +1,9 @@
 #!/bin/bash
 # install.sh
 #
+# Copyright (C) 2026 N2DYI
+# Licensed under the GNU General Public License, version 2. See LICENSE.
+#
 # Install the DECtalk telemetry and node name scripts on an ASL3 node:
 #   1. Check that this is ASL3 (and not HamVoIP)
 #   2. Build and install DECtalk's "say" if it is not already working

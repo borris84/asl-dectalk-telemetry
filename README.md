@@ -250,3 +250,14 @@ Restart Asterisk afterwards with `sudo systemctl restart asterisk`.
   by N5LSN, updated by Jory A. Pratt
   (<https://github.com/hardenedpenguin/asl-misc-scripts>).
 - DECtalk source code: <https://github.com/dectalk/dectalk>.
+
+## License
+
+Copyright (C) 2026 N2DYI
+
+Licensed under the GNU General Public License, version 2. See
+[LICENSE](LICENSE). `write_node_callsigns_dectalk.sh` is based on a
+GPL-2.0 script, so the whole project uses the same license.
+
+DECtalk itself is not part of this project. The installer downloads it
+from its own repository, and its own terms apply.

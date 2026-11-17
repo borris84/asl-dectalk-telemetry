@@ -1,5 +1,8 @@
 #!/bin/bash
 #
+# Copyright (C) 2026 N2DYI
+# Licensed under the GNU General Public License, version 2. See LICENSE.
+#
 # Render the ASL3 telemetry prompts in prompt-list.txt with DECtalk.
 #
 # Each line of prompt-list.txt is "filename: prompt-to-speak". Every prompt is

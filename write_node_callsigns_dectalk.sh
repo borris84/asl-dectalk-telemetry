@@ -3,6 +3,10 @@
 #
 # Original script by N5LSN
 # Updated by Jory A. Pratt
+# DECtalk version Copyright (C) 2026 N2DYI
+#
+# Licensed under the GNU General Public License, version 2, like the
+# original (https://github.com/hardenedpenguin/asl-misc-scripts). See LICENSE.
 #
 # Make app_rpt telemetry use ASL callsigns instead of node numbers.
 # Intended for use on ASL3.
