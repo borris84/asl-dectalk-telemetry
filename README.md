@@ -62,7 +62,13 @@ anything else, run:
 curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main/install.sh | sudo bash -s -- --upgrade
 ```
 
-or, from a copy of the repository, `sudo ./install.sh --upgrade`.
+If you are already logged in as root, you can leave out `sudo`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main/install.sh | bash -s -- --upgrade
+```
+
+Or, from a copy of the repository, `sudo ./install.sh --upgrade`.
 
 An upgrade:
 
