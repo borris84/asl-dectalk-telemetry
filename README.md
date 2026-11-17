@@ -2,7 +2,7 @@
 
 DECtalk voice telemetry and node name announcements for AllStarLink 3 (ASL3).
 
-Version 0.12
+Version 0.13
 
 This project replaces the stock ASL3 telemetry voice with DECtalk. It also
 builds a spoken announcement for every node in the AllStarLink node
@@ -43,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main
 ```
 
 The installer downloads the release files to
-`/usr/local/src/asl-dectalk-telemetry-0.12` and runs from there.
+`/usr/local/src/asl-dectalk-telemetry-0.13` and runs from there.
 
 ### Install from a copy of the repository
 
@@ -52,6 +52,35 @@ git clone https://github.com/borris84/asl-dectalk-telemetry.git
 cd asl-dectalk-telemetry
 sudo ./install.sh
 ```
+
+## Upgrading
+
+To upgrade an existing install to the latest version without changing
+anything else, run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main/install.sh | sudo bash -s -- --upgrade
+```
+
+or, from a copy of the repository, `sudo ./install.sh --upgrade`.
+
+An upgrade:
+
+- replaces the scripts in `/opt/asl-telem`
+- asks whether to keep your copy of `dec-init.cfg` or `prompt-list.txt` if
+  you have edited them
+- keeps your `node-overrides.conf`
+- doesn't install packages, change the Asterisk config, or generate any
+  sounds
+
+It stops if nothing is installed yet. When it finishes, it lists anything
+that isn't set up, for example a setting added in a newer version. Run the
+installer without `--upgrade` to set those up; it skips everything that is
+already done.
+
+Existing sounds aren't changed by an upgrade. To use changes in the new
+version, regenerate them (see
+[Generating the node name announcements](#generating-the-node-name-announcements)).
 
 ## How the installer works
 
@@ -202,6 +231,8 @@ pitch so the announcement sounds finished:
 - `-P` works with `-i`: "November, 2, Delta, Yankee, India. Node 5 0 6 3 1 1".
 - Papa and Delta are written as DECtalk phonemes, so that they are said
   "pah-PAH" (not "poppa") and "DELL-tah" (not "delda").
+- To make just one node phonetic, see
+  [Making one node phonetic](#making-one-node-phonetic).
 - The pause is DECtalk's comma pause, which you can change with the
   `[:comma ...]` command in `dec-init.cfg` (see
   [Changing the voice](#changing-the-voice)).
@@ -234,6 +265,29 @@ After turning either one on or off, rebuild every announcement:
 ```sh
 sudo write_node_callsigns_dectalk.sh -a -r -P      # for example, to switch to phonetic
 ```
+
+### Making one node phonetic
+
+To rebuild a single node phonetically, for example node 51018 (W6EK):
+
+```sh
+sudo write_node_callsigns_dectalk.sh -n 51018 -r -P
+```
+
+Add `-i` if your other announcements include node numbers. Normal runs
+leave the node as it is, but it goes back to letters if its call sign
+changes in the node database, or if you rebuild everything without `-P`.
+
+To keep it phonetic for good, save the phonetic wording as a text override
+instead (see below):
+
+```sh
+sudo write_node_callsigns_dectalk.sh -n 51018 -t "51018=Whiskey, 6, Echo, Kilo."
+```
+
+The commas give the pauses and the final period gives the falling pitch.
+For Papa and Delta, use the same phonemes as `-P`: `[paap'aa]` and
+`[d'ehl tah]`.
 
 ### Overriding a node's announcement
 

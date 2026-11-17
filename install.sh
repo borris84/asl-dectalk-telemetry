@@ -20,10 +20,14 @@
 #   curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main/install.sh | sudo bash
 # In that case it downloads release $VERSION and runs from that copy.
 # Safe to run again: finished steps are detected and skipped.
+#
+# install.sh --upgrade only replaces the scripts of an existing install
+# (from GitHub: ... | sudo bash -s -- --upgrade). It changes no Asterisk
+# config, installs no packages and generates no sounds.
 
 set -uo pipefail
 
-VERSION=0.12
+VERSION=0.13
 REPO=borris84/asl-dectalk-telemetry
 RELEASE_URL="https://github.com/$REPO/archive/refs/tags/v$VERSION.tar.gz"
 DOWNLOAD_DIR=/usr/local/src/asl-dectalk-telemetry-$VERSION
@@ -54,8 +58,10 @@ DATA_FILES=(dec-init.cfg prompt-list.txt)
 # Installed only if missing: the user's own settings, never replaced.
 USER_FILES=(node-overrides.conf)
 
+VERSION_FILE=$INSTALL_DIR/VERSION
 STAMP=$(date +%Y%m%d-%H%M%S)
 ASTERISK_RESTART_NEEDED=0
+MODE=install
 
 die() {
     printf 'Error: %s\n' "$*" >&2
@@ -317,7 +323,6 @@ step_node_database() {
 # --- Step 4: scripts -------------------------------------------------------
 
 step_scripts() {
-    local f src dest link
     step 4 "Install the scripts"
 
     echo "The scripts and their data files will be copied to $INSTALL_DIR,"
@@ -325,6 +330,13 @@ step_scripts() {
     echo "from anywhere."
     echo
     ask_yn "Continue?" y || die "Installation stopped."
+    install_files
+}
+
+# Copy the scripts and data files into INSTALL_DIR and link the scripts
+# into BIN_DIR. Used by both install and --upgrade.
+install_files() {
+    local f src dest link
 
     mkdir -p -- "$INSTALL_DIR" || die "Could not create $INSTALL_DIR"
 
@@ -373,6 +385,8 @@ step_scripts() {
         ln -sfn -- "$INSTALL_DIR/$f" "$link" || die "Could not link $link"
         echo "Linked $link -> $INSTALL_DIR/$f"
     done
+
+    echo "$VERSION" > "$VERSION_FILE" || die "Could not write $VERSION_FILE"
 }
 
 # --- Step 5: asterisk.conf -------------------------------------------------
@@ -477,8 +491,18 @@ step_rpt_conf() {
 # --- Step 7: verify --------------------------------------------------------
 
 step_verify() {
-    local problems=0 f
     step 7 "Check the installation"
+    if ! run_checks; then
+        echo "Fix them and run this installer again before generating the sounds."
+        return 1
+    fi
+    echo "Everything is installed."
+}
+
+# Print an OK/PROBLEM line for each part of the install. Changes nothing.
+# Returns 1 if anything is wrong.
+run_checks() {
+    local problems=0 f
 
     check() {
         if eval "$2"; then
@@ -505,11 +529,9 @@ step_verify() {
 
     echo
     if (( problems )); then
-        echo "$problems problem(s) found. Fix them and run this installer again"
-        echo "before generating the sounds."
+        echo "$problems problem(s) found."
         return 1
     fi
-    echo "Everything is installed."
 }
 
 # --- Step 8: generate sounds -----------------------------------------------
@@ -546,7 +568,63 @@ step_generate() {
     fi
 }
 
+# --- Upgrade ---------------------------------------------------------------
+
+upgrade() {
+    local old=""
+    [[ -f $INSTALL_DIR/$TELEM_SCRIPT && -f $INSTALL_DIR/$NODES_SCRIPT ]] \
+        || die "No existing install found in $INSTALL_DIR. Run this installer without --upgrade to install."
+    [[ -f $VERSION_FILE ]] && old=$(< "$VERSION_FILE")
+
+    echo "DECtalk telemetry upgrade for AllStarLink 3"
+    echo
+    echo "Installed version: ${old:-0.12 or older}"
+    echo "New version:       $VERSION"
+    echo
+    echo "This replaces the scripts in $INSTALL_DIR. If you have edited"
+    echo "dec-init.cfg or prompt-list.txt, you will be asked whether to keep"
+    echo "your copy. Your node-overrides.conf is kept."
+    echo "Nothing else is changed: no packages, no Asterisk config, and no"
+    echo "sounds are generated."
+    echo
+    ask_yn "Upgrade now?" y || { echo "Nothing was changed."; exit 0; }
+    echo
+    install_files
+
+    echo
+    echo "Checking the installation:"
+    if ! run_checks; then
+        echo "Run this installer without --upgrade to set up what is missing."
+        echo "It skips everything that is already done."
+    fi
+    echo
+    echo "Upgrade to $VERSION done. Existing sounds were not changed."
+    echo "To use changes in this version, regenerate them as described in the"
+    echo "README (for example: $NODES_SCRIPT -a -r)."
+}
+
+usage() {
+    cat << EOF
+Usage: install.sh [--upgrade]
+
+Without options, guide you through installing DECtalk, the scripts and the
+Asterisk configuration.
+
+   --upgrade, -u  Only replace the scripts of an existing install with this
+                  version. Changes no Asterisk config, installs no packages
+                  and generates no sounds.
+   --help, -h     Show this message
+EOF
+}
+
 # --- Main ------------------------------------------------------------------
+
+case ${1:-} in
+    "") ;;
+    --upgrade|-u) MODE=upgrade ;;
+    --help|-h) usage; exit 0 ;;
+    *) usage >&2; die "Unknown option: $1" ;;
+esac
 
 [[ $EUID -eq 0 ]] || die "This installer must be run as root (for example: sudo $0)."
 
@@ -574,6 +652,11 @@ if (( ! have_files )); then
         || die "Could not download $RELEASE_URL"
     [[ -f $DOWNLOAD_DIR/install.sh ]] || die "The download from $RELEASE_URL has no install.sh"
     exec bash "$DOWNLOAD_DIR/install.sh" "$@" < /dev/tty
+fi
+
+if [[ $MODE == upgrade ]]; then
+    upgrade
+    exit 0
 fi
 
 echo "DECtalk telemetry installer for AllStarLink 3, version $VERSION"
