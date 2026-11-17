@@ -10,10 +10,10 @@ database, so Asterisk says "N 2 D Y I" instead of reading out a node number.
 
 It contains:
 
-| File | What it does |
+| File | action |
 | --- | --- |
 | `install.sh` | Guided installer. Installs DECtalk and the scripts, and configures Asterisk. |
-| `dectalk-telemetry.sh` | Generates the telemetry prompts listed in `prompt-list.txt` with DECtalk. |
+| `dectalk-telemetry.sh` | Generates the telemetry prompts listed in `prompt-list.txt` with DECtalk. This is a minimal prompt list, only what is necessary for app_rpt, not the full set from Asterisk. |
 | `write_node_callsigns_dectalk.sh` | Generates a DECtalk announcement for each node in the ASL node database. |
 | `prompt-list.txt` | The telemetry prompts: a sound file name and the text DECtalk speaks for it. |
 | `dec-init.cfg` | DECtalk voice settings (speaking rate, pitch and so on) used by both scripts. |
@@ -52,7 +52,7 @@ cd asl-dectalk-telemetry
 sudo ./install.sh
 ```
 
-## What the installer does
+## How the installer works
 
 The installer asks before each change. It answers most questions with a
 default when you press Enter. Every config file it edits is backed up first
@@ -122,7 +122,7 @@ extension. Blank lines and lines starting with `#` are ignored. Run
 
 ```sh
 sudo write_node_callsigns_dectalk.sh -a      # first time: every node
-sudo write_node_callsigns_dectalk.sh         # later: only new or changed nodes
+sudo write_node_callsigns_dectalk.sh         # later: only new or changed nodes, probably what you want on a crontab if the node list refreshed gets every so often
 ```
 
 Announcements are saved in `/usr/share/asterisk/sounds/custom/rpt/nodenames`
