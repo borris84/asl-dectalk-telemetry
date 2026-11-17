@@ -2,7 +2,7 @@
 
 DECtalk voice telemetry and node name announcements for AllStarLink 3 (ASL3).
 
-Version 0.11
+Version 0.12
 
 This project replaces the stock ASL3 telemetry voice with DECtalk. It also
 builds a spoken announcement for every node in the AllStarLink node
@@ -43,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main
 ```
 
 The installer downloads the release files to
-`/usr/local/src/asl-dectalk-telemetry-0.11` and runs from there.
+`/usr/local/src/asl-dectalk-telemetry-0.12` and runs from there.
 
 ### Install from a copy of the repository
 
@@ -182,12 +182,37 @@ How the call sign field is spoken:
 - Anything else, such as `FIRESIDE` or `Seattle`, is spoken as a word.
   Asterisks are dropped.
 
+### Phonetic call signs
+
+With `-P`, call signs are spoken with the phonetic alphabet instead of
+letters. There is a short pause between items, and the last one falls in
+pitch so the announcement sounds finished:
+
+| Call sign field | Spoken as |
+| --- | --- |
+| `N2DYI` | November, 2, Delta, Yankee, India. |
+| `KA4EPS/R` | Kilo, Alfa, 4, Echo, Papa, Sierra, slash R. |
+| `VA2RXP-25` | Victor, Alfa, 2, Romeo, X-ray, Papa, dash, 25. |
+
+- Only call signs are spoken phonetically. Other text, such as `FIRESIDE`,
+  is spoken as before.
+- A short suffix joined to a call sign by `/` or `-` is spoken as part of
+  it, except `/R`. That marks a repeater and isn't part of the call, so it
+  is spoken as "slash R".
+- `-P` works with `-i`: "November, 2, Delta, Yankee, India. Node 5 0 6 3 1 1".
+- Papa and Delta are written as DECtalk phonemes, so that they are said
+  "pah-PAH" (not "poppa") and "DELL-tah" (not "delda").
+- The pause is DECtalk's comma pause, which you can change with the
+  `[:comma ...]` command in `dec-init.cfg` (see
+  [Changing the voice](#changing-the-voice)).
+
 ### Options
 
 | Option | Meaning |
 | --- | --- |
 | `-a` | Process all nodes. Existing files are skipped unless `-r` is given. |
 | `-i` | Say the node number after the call sign, for example "N 2 D Y I, node 5 0 6 3 1 1". |
+| `-P` | Speak call signs phonetically. See [Phonetic call signs](#phonetic-call-signs). |
 | `-n NODE` | Process one node. |
 | `-r` | Regenerate files even if they already exist. |
 | `-f` | Don't ask for confirmation before starting. |
@@ -202,6 +227,13 @@ How the call sign field is spoken:
 | `-l` | List the saved overrides. |
 | `-c PATH` | Use a different overrides file. |
 | `-h` | Show help. |
+
+`-i` and `-P` only affect announcements that are built during that run.
+After turning either one on or off, rebuild every announcement:
+
+```sh
+sudo write_node_callsigns_dectalk.sh -a -r -P      # for example, to switch to phonetic
+```
 
 ### Overriding a node's announcement
 
@@ -304,7 +336,7 @@ for example every night at 3:00. Edit root's crontab with
 0 3 * * * /usr/local/bin/write_node_callsigns_dectalk.sh -f
 ```
 
-If you use `-i`, add it to the same line. Overrides don't need to be
+If you use `-i` or `-P`, add them to the same line. Overrides don't need to be
 given, because they are read from the overrides file.
 
 ## Changing the voice

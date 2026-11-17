@@ -35,7 +35,10 @@
 #   - Only nodes whose override was added, changed or removed since the
 #     last run are rebuilt (the applied overrides are kept beside the
 #     previous-db).
-#   - -a / -n / -i / -o / -t / -x / -l / -c / -v / -j / -r / -s / -p
+#   - -P speaks call signs with the phonetic alphabet ("November, echo,
+#     2, Delta, Yankee, India."), with a pause between items and a falling
+#     pitch on the last one
+#   - -a / -n / -i / -P / -o / -t / -x / -l / -c / -v / -j / -r / -s / -p
 
 set -euo pipefail
 
@@ -59,6 +62,7 @@ PROGRESS_EVERY=1000
 
 VERBOSE=0
 INCNODE=0
+PHONETIC=0
 FORCE_RUN=0
 FORCE_REBUILD=0
 PROCESS_ALL=0
@@ -83,6 +87,7 @@ OPTIONS:
    -h          Show this message
    -a          Process all nodes (fill gaps; skips existing unless -r)
    -i          Append "node" + node number after the callsign
+   -P          Speak call signs phonetically: November, echo, 2, Delta...
    -n NODE     Process a single node
    -d PATH     Destination directory (default: $DESTDIR)
    -j N        Parallel jobs (default: nproc)
@@ -106,6 +111,8 @@ OPTIONS:
    -c PATH     Overrides file (default: $OVERRIDES_FILE)
 
 Output files are raw headerless u-law (.ulaw), spoken by DECtalk.
+-i and -P only affect nodes that are (re)built: after turning either on or
+off, rebuild everything with -a -r.
 If dec-init.cfg exists beside this script, it is prepended to the spoken text.
 Overrides are saved in the overrides file and applied on every run; the file
 can also be edited by hand. Only nodes whose override was added, changed or
@@ -165,6 +172,47 @@ spell_out() {
     SPELLED=${SPELLED% }
 }
 
+# Append the phonetic alphabet words for each character of "$1" to the
+# PHONETIC_ITEMS array: N2DYI -> November echo... Digits stay digits.
+#
+# Papa and Delta are written as phonemes. DECtalk says "papa" as "poppa",
+# and softens the t in "delta" to "delda"; starting the t's syllable as a
+# separate word keeps it a full t.
+phonetic_items() {
+    local word=${1^^} i
+    for (( i = 0; i < ${#word}; i++ )); do
+        case ${word:i:1} in
+            A) PHONETIC_ITEMS+=(Alfa) ;;
+            B) PHONETIC_ITEMS+=(Bravo) ;;
+            C) PHONETIC_ITEMS+=(Charlie) ;;
+            D) PHONETIC_ITEMS+=("[d'ehl tah]") ;;
+            E) PHONETIC_ITEMS+=(Echo) ;;
+            F) PHONETIC_ITEMS+=(Foxtrot) ;;
+            G) PHONETIC_ITEMS+=(Golf) ;;
+            H) PHONETIC_ITEMS+=(Hotel) ;;
+            I) PHONETIC_ITEMS+=(India) ;;
+            J) PHONETIC_ITEMS+=(Juliett) ;;
+            K) PHONETIC_ITEMS+=(Kilo) ;;
+            L) PHONETIC_ITEMS+=(Lima) ;;
+            M) PHONETIC_ITEMS+=(Mike) ;;
+            N) PHONETIC_ITEMS+=(November) ;;
+            O) PHONETIC_ITEMS+=(Oscar) ;;
+            P) PHONETIC_ITEMS+=("[paap'aa]") ;;
+            Q) PHONETIC_ITEMS+=(Quebec) ;;
+            R) PHONETIC_ITEMS+=(Romeo) ;;
+            S) PHONETIC_ITEMS+=(Sierra) ;;
+            T) PHONETIC_ITEMS+=(Tango) ;;
+            U) PHONETIC_ITEMS+=(Uniform) ;;
+            V) PHONETIC_ITEMS+=(Victor) ;;
+            W) PHONETIC_ITEMS+=(Whiskey) ;;
+            X) PHONETIC_ITEMS+=(X-ray) ;;
+            Y) PHONETIC_ITEMS+=(Yankee) ;;
+            Z) PHONETIC_ITEMS+=(Zulu) ;;
+            *) PHONETIC_ITEMS+=("${word:i:1}") ;;
+        esac
+    done
+}
+
 # Return 0 if $1 (letters and digits only) has the shape of an IARU/ITU
 # amateur radio call sign: a prefix, one separating digit, and a suffix of
 # one to four characters, the last of which is a letter.
@@ -183,12 +231,18 @@ is_callsign() {
 #     spoken as "slash" / "dash"
 #   - a call sign's final I is sent as [']I (stressed) so it rises
 #   - a VA/VE prefix gets a glottal stop after the V (V [q] e 3 R W J)
+#   - with PHONETIC=1, call signs use the phonetic alphabet instead, one
+#     item per comma (a pause) and a period after the last (falling
+#     pitch). A short suffix joined by "/" or "-" (KA4EPS/R, VA2RXP-25)
+#     is part of the call sign: "... Romeo, X-ray, Papa, dash, 25." A
+#     repeater's "/R" is not spelled phonetically: "... Sierra, slash R."
 #   - asterisks are dropped
 #   - everything else is passed through untouched
 callsign_to_speech() {
     local rest=$1
     local -a tokens=() kinds=()
-    local i n tok text="" SPELLED=""
+    local i n tok item text="" SPELLED=""
+    local -a PHONETIC_ITEMS
 
     # Square brackets are DECtalk's command/phoneme delimiters. astdb is
     # user-supplied data, so never let it issue DECtalk commands.
@@ -216,6 +270,26 @@ callsign_to_speech() {
     for (( i = 0; i < n; i++ )); do
         case "${kinds[i]}" in
             c)
+                if (( PHONETIC )); then
+                    PHONETIC_ITEMS=()
+                    phonetic_items "${tokens[i]}"
+                    if (( i + 2 < n )) && [[ ${tokens[i+1]} == [/-] && ${tokens[i+2]} =~ ^[A-Za-z0-9]{1,4}$ ]]; then
+                        if [[ ${tokens[i+1]} == / ]]; then PHONETIC_ITEMS+=(slash); else PHONETIC_ITEMS+=(dash); fi
+                        if [[ ${tokens[i+1]} == / && ${tokens[i+2]} == [Rr] ]]; then
+                            # "/R" marks a repeater; it isn't part of the call.
+                            PHONETIC_ITEMS[-1]="slash R"
+                        elif [[ ${tokens[i+2]} =~ ^[0-9]+$ ]]; then
+                            PHONETIC_ITEMS+=("${tokens[i+2]}")
+                        else
+                            phonetic_items "${tokens[i+2]}"
+                        fi
+                        (( i += 2 ))
+                    fi
+                    text+=" ${PHONETIC_ITEMS[0]}"
+                    for item in "${PHONETIC_ITEMS[@]:1}"; do text+=", $item"; done
+                    text+=". "
+                    continue
+                fi
                 spell_out "${tokens[i]}"
                 # A final I falls flat; a leading stress mark makes it rise.
                 [[ $SPELLED == *" I" ]] && SPELLED="${SPELLED% I} [']I"
@@ -269,7 +343,8 @@ process_one_node() {
 
     if (( INCNODE )); then
         spell_out "$node"
-        text+=", node $SPELLED"
+        # After a phonetic call sign's closing period, start a new sentence.
+        if [[ $text == *. ]]; then text+=" Node $SPELLED"; else text+=", node $SPELLED"; fi
     fi
 
     # [:phoneme on] makes DECtalk treat ['] as a stress mark rather than
@@ -291,7 +366,7 @@ process_one_node() {
     printf 'OK %s %s -> %s\n' "$node" "$callsign" "$text"
 }
 
-export -f process_one_node callsign_to_speech is_callsign spell_out
+export -f process_one_node callsign_to_speech is_callsign spell_out phonetic_items
 
 load_previous_database() {
     PREV_CALLSIGNS=()
@@ -644,7 +719,7 @@ format_total_time() {
 }
 
 # --- options ---
-while getopts "haij:n:d:s:p:o:t:x:c:lfvr" OPTION; do
+while getopts "haiPj:n:d:s:p:o:t:x:c:lfvr" OPTION; do
     case "$OPTION" in
         o)
             parse_override o "$OPTARG"
@@ -666,6 +741,7 @@ while getopts "haij:n:d:s:p:o:t:x:c:lfvr" OPTION; do
         h) usage; exit 0 ;;
         a) PROCESS_ALL=1 ;;
         i) INCNODE=1 ;;
+        P) PHONETIC=1 ;;
         j) JOBS="$OPTARG" ;;
         n) SINGLE_NODE="$OPTARG" ;;
         d) DESTDIR="$OPTARG" ;;
@@ -719,7 +795,7 @@ if [[ -f "$INIT_CFG" ]]; then
 fi
 
 ensure_directory_exists "$DESTDIR"
-export SAY DECTALK_INIT INCNODE DESTDIR VERBOSE
+export SAY DECTALK_INIT INCNODE PHONETIC DESTDIR VERBOSE
 
 load_previous_database
 

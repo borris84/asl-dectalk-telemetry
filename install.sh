@@ -23,7 +23,7 @@
 
 set -uo pipefail
 
-VERSION=0.11
+VERSION=0.12
 REPO=borris84/asl-dectalk-telemetry
 RELEASE_URL="https://github.com/$REPO/archive/refs/tags/v$VERSION.tar.gz"
 DOWNLOAD_DIR=/usr/local/src/asl-dectalk-telemetry-$VERSION
@@ -536,6 +536,10 @@ step_generate() {
         echo "Each announcement can be followed by the node number,"
         echo "for example \"N 2 D Y I, node 5 0 6 3 1 1\"."
         ask_yn "Add the node number after each call sign?" n && args+=(-i)
+        echo
+        echo "Call signs can be spelled with letters (\"N 2 D Y I\") or with the"
+        echo "phonetic alphabet (\"November, 2, Delta, Yankee, India\")."
+        ask_yn "Speak call signs phonetically?" n && args+=(-P)
         "$BIN_DIR/$NODES_SCRIPT" "${args[@]}" || echo "$NODES_SCRIPT reported a problem (see above)."
     else
         echo "Skipped. Run \"$NODES_SCRIPT -a\" later to build them."
