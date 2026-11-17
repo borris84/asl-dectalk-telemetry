@@ -2,7 +2,7 @@
 
 DECtalk voice telemetry and node name announcements for AllStarLink 3 (ASL3).
 
-Version 0.16
+Version 0.17
 
 This project replaces the stock ASL3 telemetry voice with DECtalk. It also
 builds a spoken announcement for every node in the AllStarLink node
@@ -43,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main
 ```
 
 The installer downloads the release files to
-`/usr/local/src/asl-dectalk-telemetry-0.16` and runs from there.
+`/usr/local/src/asl-dectalk-telemetry-0.17` and runs from there.
 
 ### Install from a copy of the repository
 
