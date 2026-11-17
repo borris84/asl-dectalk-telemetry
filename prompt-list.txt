@@ -1,0 +1,243 @@
+digits/0: zero
+digits/10: ten
+digits/11: eleven
+digits/12: twelve
+digits/13: thirteen
+digits/14: fourteen
+digits/15: fifteen
+digits/16: sixteen
+digits/17: seventeen
+digits/18: eighteen
+digits/19: nineteen
+digits/1: one
+digits/20: twenty
+digits/2: two
+digits/30: thirty
+digits/3: three
+digits/40: forty
+digits/4: four
+digits/50: fifty
+digits/5: five
+digits/60: sixty
+digits/6: six
+digits/70: seventy
+digits/7: seven
+digits/80: eighty
+digits/8: eight
+digits/90: ninety
+digits/9: nine
+digits/a-m: A.M.
+digits/at: at
+digits/billion: billion
+digits/day-0: Sunday
+digits/day-1: Monday
+digits/day-2: Tuesday
+digits/day-3: Wednesday
+digits/day-4: Thursday
+digits/day-5: Friday
+digits/day-6: Saturday
+digits/dollars: dollars
+digits/h-10: tenth
+digits/h-11: eleventh
+digits/h-12: twelfth
+digits/h-13: thirteenth
+digits/h-14: fourteenth
+digits/h-15: fifteenth
+digits/h-16: sixteenth
+digits/h-17: seventeenth
+digits/h-18: eighteenth
+digits/h-19: nineteenth
+digits/h-1: first
+digits/h-20: twentieth
+digits/h-2: second
+digits/h-30: thirtieth
+digits/h-3: third
+digits/h-40: fourtieth
+digits/h-4: fourth
+digits/h-50: fiftieth
+digits/h-5: fifth
+digits/h-60: sixtieth
+digits/h-6: sixth
+digits/h-70: seventieth
+digits/h-7: seventh
+digits/h-80: eightieth
+digits/h-8: eighth
+digits/h-90: ninetieth
+digits/h-9: ninth
+digits/h-billion: billionth
+digits/h-hundred: hundredth
+digits/h-million: millionth
+digits/h-thousand: thousandth
+digits/hundred: hundred
+digits/million: million
+digits/minus: minus
+digits/mon-0: January
+digits/mon-10: November
+digits/mon-11: December
+digits/mon-1: February
+digits/mon-2: March
+digits/mon-3: April
+digits/mon-4: May
+digits/mon-5: June
+digits/mon-6: July
+digits/mon-7: August
+digits/mon-8: September
+digits/mon-9: October
+digits/oclock: o'clock
+digits/oh: oh
+digits/p-m: P.M.
+digits/pound: pound
+digits/star: star
+digits/thousand: thousand
+digits/today: today
+digits/tomorrow: tomorrow
+digits/yesterday: yesterday
+letters/a: a
+letters/ascii123: left brace
+letters/ascii124: pipe
+letters/ascii125: right brace
+letters/ascii126: tilde
+letters/ascii34: quote
+letters/ascii36: dollar sign
+letters/ascii37: percent
+letters/ascii38: ampersand
+letters/ascii39: tick
+letters/ascii40: open parenthesis
+letters/ascii41: close parenthesis
+letters/ascii42: star
+letters/ascii44: comma
+letters/ascii58: colon
+letters/ascii59: semicolon
+letters/ascii60: less than
+letters/ascii62: greater than
+letters/ascii63: question mark
+letters/ascii91: left bracket
+letters/ascii92: backslash
+letters/ascii93: right bracket
+letters/ascii94: caret
+letters/ascii95: underscore
+letters/ascii96: backtick
+letters/asterisk: asterisk
+letters/at: at [@]
+letters/b: b
+letters/c: c
+letters/d: d
+letters/dash: dash [-]
+letters/dollar: dollar [$]
+letters/dot: dot [.]
+letters/e: e
+letters/equals: equals [=]
+letters/exclaimation-point: exclaimation-point [!]
+letters/f: f
+letters/g: g
+letters/h: h
+letters/i: i
+letters/j: j
+letters/k: k
+letters/l: l
+letters/m: m
+letters/n: n
+letters/o: o
+letters/p: p
+letters/plus: plus [+]
+letters/q: q
+letters/r: r
+letters/s: s
+letters/slash: slash [/]
+letters/space: space [ ]
+letters/t: t
+letters/u: u
+letters/v: v
+letters/w: w
+letters/x: x
+letters/y: y
+letters/z: z
+letters/zed: zed
+phonetic/9_p: niner
+phonetic/a_p: alpha
+phonetic/b_p: bravo
+phonetic/c_p: charlie
+phonetic/d_p: delta
+phonetic/e_p: echo
+phonetic/f_p: foxtrot
+phonetic/g_p: golf
+phonetic/h_p: hotel
+phonetic/i_p: india
+phonetic/j_p: juliet
+phonetic/k_p: kilo
+phonetic/l_p: lima
+phonetic/m_p: mike
+phonetic/n_p: november
+phonetic/o_p: oscar
+phonetic/p_p: papa
+phonetic/q_p: quebec
+phonetic/r_p: romeo
+phonetic/s_p: sierra
+phonetic/t_p: tango
+phonetic/u_p: uniform
+phonetic/v_p: victor
+phonetic/w_p: whiskey
+phonetic/x_p: xray
+phonetic/y_p: yankee
+phonetic/z_p: zulu
+rpt/act-timeout-warning: Warning! Inactivity timeout in [q]
+rpt/alllinksdisconnected: All links disconnected.
+rpt/alllinksrestored: All links restored.
+rpt/autopatch_on: Autopatch, on.
+rpt/callproceeding: Connecting.
+rpt/callterminated: Call terminated.
+rpt/connected: Connected.
+rpt/connected-to: Connected to[q]
+rpt/connecting: connecting
+rpt/connection_failed: Connection failed!
+rpt/down: down.
+rpt/fast: fast
+rpt/frequency: frequency
+rpt/goodafternoon: Good afternoon.
+rpt/goodevening: Good evening.
+rpt/goodmorning: Good morning.
+rpt/hipwr: High power.
+rpt/in-call: Incoming call, [/] on
+rpt/invalid-freq: Invalid frequency.
+rpt/keyedfor: [k'iydforq]
+rpt/latitude: latitude
+rpt/localmonitor: Local monitor.
+rpt/login: login
+rpt/longitude: longitude
+rpt/lopwr: Low power.
+rpt/macro_busy: Macro busy.
+rpt/macro_notfound: Macro not found.
+rpt/medpwr: Medium power.
+rpt/memory_notfound: Memory not found.
+rpt/minus: minus
+rpt/monitor: monitor.
+rpt/node: [/nowd]
+rpt/node_enabled: ['aolxstar] node enabled.
+rpt/off: Off.
+rpt/on: On.
+rpt/plus: plus
+rpt/quick: quick
+rpt/remote_already: Remote already in this mode.
+rpt/remote_busy: Remote busy.
+rpt/remote_disc: Disconnected.
+rpt/repeat_only: Repeat only.
+rpt/revpatch-intro: Please hold for a few moments, and your call will be connected if there is someone there to answer. Thank you.
+rpt/revpatch-noanswer: We're sorry, but no one was available to answer your call at this time.
+rpt/rxpl: PL decode.
+rpt/seconds: seconds.
+rpt/simplex: simplex
+rpt/sitenorm: Site normal.
+rpt/slow: slow.
+rpt/stop: Stop.
+rpt/thetemperatureis: The temperature is [q]
+rpt/thetimeis: The time is [q]
+rpt/thevoltageis: The voltage is [q]
+rpt/thewindis: The wind is [q]
+rpt/timeout: timeout!
+rpt/timeout-warning: Warning! System timeout in [q]
+rpt/transceive: [traens'iyv.]
+rpt/txpl: PL Encode.
+rpt/unauthtx: Unauthorized transmit frequency.
+rpt/unkeyedfor: [axnk'iydforq]
+rpt/up: up.
+rpt/version: Version [/]
