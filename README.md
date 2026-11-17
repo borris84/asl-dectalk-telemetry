@@ -2,7 +2,7 @@
 
 DECtalk voice telemetry and node name announcements for AllStarLink 3 (ASL3).
 
-Version 0.13
+Version 0.14
 
 This project replaces the stock ASL3 telemetry voice with DECtalk. It also
 builds a spoken announcement for every node in the AllStarLink node
@@ -43,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main
 ```
 
 The installer downloads the release files to
-`/usr/local/src/asl-dectalk-telemetry-0.13` and runs from there.
+`/usr/local/src/asl-dectalk-telemetry-0.14` and runs from there.
 
 ### Install from a copy of the repository
 
@@ -254,6 +254,7 @@ pitch so the announcement sounds finished:
 | `-p PATH` | Where to keep the previous copy of the database. |
 | `-o KEY=TEXT` | Save an override of what is spoken for a node or call sign. See below. |
 | `-t NODE=TEXT` | Save custom text for a node. See below. |
+| `-m KEY=WORDS` | Save a mode that turns `-P` or `-i` on or off for one node or call sign. See below. |
 | `-x KEY` | Remove the saved override for a node or call sign. |
 | `-l` | List the saved overrides. |
 | `-c PATH` | Use a different overrides file. |
@@ -278,16 +279,12 @@ Add `-i` if your other announcements include node numbers. Normal runs
 leave the node as it is, but it goes back to letters if its call sign
 changes in the node database, or if you rebuild everything without `-P`.
 
-To keep it phonetic for good, save the phonetic wording as a text override
-instead (see below):
+To keep it phonetic for good, save a mode for it instead (see
+[Per-node modes](#per-node-modes)):
 
 ```sh
-sudo write_node_callsigns_dectalk.sh -n 51018 -t "51018=Whiskey, 6, Echo, Kilo."
+sudo write_node_callsigns_dectalk.sh -m "51018=phonetic"
 ```
-
-The commas give the pauses and the final period gives the falling pitch.
-For Papa and Delta, use the same phonemes as `-P`: `[paap'aa]` and
-`[d'ehl tah]`.
 
 ### Overriding a node's announcement
 
@@ -296,7 +293,7 @@ replaces what is spoken for a node, so you can tell them apart. Overrides
 are saved in `/opt/asl-telem/node-overrides.conf` and applied every time the
 script runs.
 
-There are two kinds of override:
+There are three kinds of entry:
 
 - **override** replaces the call sign field from the database. It can be
   for one node number, or for a call sign (every node with that call sign).
@@ -304,9 +301,11 @@ There are two kinds of override:
   spelled out.
 - **text** speaks the text exactly as written for one node, with no call
   sign spelling. DECtalk commands such as `[:ra 200]` can be used in it.
+- **mode** changes how a node is spoken, without changing what is said.
+  See [Per-node modes](#per-node-modes).
 
 For the same node, a text entry wins over an override, and a node-number
-override wins over a call sign override.
+override or mode wins over a call sign one.
 
 #### Adding overrides from the command line
 
@@ -324,8 +323,37 @@ sudo write_node_callsigns_dectalk.sh -o "506311=N2DYI hub"
 sudo write_node_callsigns_dectalk.sh -t "1999=the lab node"
 ```
 
-Giving `-o` or `-t` again for the same node or call sign replaces the saved
-text.
+Giving `-o`, `-t` or `-m` again for the same node or call sign replaces
+the saved entry.
+
+#### Per-node modes
+
+A mode turns phonetic call signs (`-P`) and node numbers (`-i`) on or off
+for just one node, or for every node with a call sign, every time those
+nodes are built. For example, to make node 506311 phonetic, and node 506312
+spelled with letters plus its node number:
+
+```sh
+sudo write_node_callsigns_dectalk.sh -m "506311=phonetic" -m "506312=letters number"
+```
+
+The words are:
+
+| Word | Effect |
+| --- | --- |
+| `phonetic` | Speak call signs phonetically, as with `-P`. |
+| `letters` | Spell call signs with letters, even when `-P` is given. |
+| `number` | Add the node number, as with `-i`. |
+| `no-number` | Leave out the node number, even when `-i` is given. |
+
+- Use one word from each pair, or one from both. Commas between words are
+  optional.
+- Anything a mode doesn't mention follows the command line. With
+  `mode 506311 = phonetic`, node 506311 gets its node number only when the
+  script is run with `-i`.
+- A mode works with an `override` or `text` entry for the same node. With a
+  `text` entry only `number` and `no-number` matter, because text is
+  spoken as written.
 
 #### Listing and removing overrides
 
@@ -335,8 +363,8 @@ sudo write_node_callsigns_dectalk.sh -x 506311     # remove the override for nod
 sudo write_node_callsigns_dectalk.sh -x N2DYI      # remove the override for call sign N2DYI
 ```
 
-`-x` removes both kinds of entry for that node or call sign, then rebuilds
-the affected nodes as they would sound without it. If a node isn't in the
+`-x` removes every entry (override, text and mode) for that node or call
+sign, then rebuilds the affected nodes as they would sound without them. If a node isn't in the
 database and its override is removed, its announcement is deleted.
 
 #### Editing the overrides file
@@ -356,11 +384,15 @@ override N2DYI = N2DYI repeater
 override 506311 = N2DYI hub
 text 1999 = the lab node
 text 1998 = the [:ra 200] test node
+mode 506311 = phonetic
+mode 506312 = letters number
 ```
 
 - `override KEY = TEXT`: KEY is a node number or a call sign. Call signs
   are matched in any case.
 - `text NODE = TEXT`: NODE must be a node number.
+- `mode KEY = WORDS`: KEY is a node number or a call sign. WORDS are listed
+  in [Per-node modes](#per-node-modes).
 - Spaces around `=` are optional.
 - TEXT can't contain `|`.
 - If the same node or call sign is listed twice, the last line wins.
@@ -372,7 +404,8 @@ After saving the file, run the script to apply the changes:
 sudo write_node_callsigns_dectalk.sh
 ```
 
-Only nodes whose override was added, changed or removed are rebuilt. The
+Only nodes whose override, text or mode was added, changed or removed are
+rebuilt. The
 script keeps a copy of the overrides it last applied in
 `/var/lib/asterisk/previous_node_overrides.conf` to work this out. A run
 with `-n NODE` only rebuilds that node and doesn't update this copy, so the

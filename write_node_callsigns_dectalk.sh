@@ -38,7 +38,9 @@
 #   - -P speaks call signs with the phonetic alphabet ("November, echo,
 #     2, Delta, Yankee, India."), with a pause between items and a falling
 #     pitch on the last one
-#   - -a / -n / -i / -P / -o / -t / -x / -l / -c / -v / -j / -r / -s / -p
+#   - "mode" entries (-m) turn -P and -i on or off for one node or call
+#     sign, without changing what is said
+#   - -a / -n / -i / -P / -o / -t / -m / -x / -l / -c / -v / -j / -r / -s / -p
 
 set -euo pipefail
 
@@ -74,8 +76,10 @@ declare -A PREV_CALLSIGNS
 declare -A NODE_OVERRIDE PREV_NODE_OVERRIDE  # node -> replacement callsign field
 declare -A CALL_OVERRIDE PREV_CALL_OVERRIDE  # CALLSIGN -> replacement callsign field
 declare -A CUSTOM_TEXT PREV_CUSTOM_TEXT      # node -> text spoken as-is
+declare -A NODE_MODE PREV_NODE_MODE          # node -> mode words ("phonetic number")
+declare -A CALL_MODE PREV_CALL_MODE          # CALLSIGN -> mode words
 OVERRIDES_SAME=0
-# -o / -t / -x edits to the overrides file, applied in command line order
+# -o / -t / -m / -x edits to the overrides file, applied in command line order
 EDIT_OPS=() EDIT_KEYS=() EDIT_TEXTS=()
 REMOVE_NODES=()
 
@@ -105,9 +109,15 @@ OPTIONS:
                Save custom text for NODE, spoken as-is with no call sign
                spelling. DECtalk [:commands] and [phonemes] are allowed.
                Wins over -o. Repeatable.
-   -x KEY      Remove the saved override(s) for KEY (a node number or a
-               callsign). Repeatable.
-   -l          List the saved overrides and exit (after any -o/-t/-x).
+   -m KEY=WORDS
+               Save a mode for KEY (a node number or a callsign) that sets
+               -P and -i for just those nodes: "phonetic" or "letters",
+               and "number" or "no-number". Anything not given follows the
+               command line. A node-number mode wins over a callsign mode.
+               Repeatable.
+   -x KEY      Remove the saved override(s) and mode for KEY (a node
+               number or a callsign). Repeatable.
+   -l          List the saved overrides and exit (after any -o/-t/-m/-x).
    -c PATH     Overrides file (default: $OVERRIDES_FILE)
 
 Output files are raw headerless u-law (.ulaw), spoken by DECtalk.
@@ -126,6 +136,7 @@ Examples:
     ./write_node_callsigns.sh -n 40000 -r # Rebuild one node
     ./write_node_callsigns.sh -f -o "506311=N2DYI hub" -o "N2DYI=N2DYI repeater"
     ./write_node_callsigns.sh -f -t "1999=the lab node"
+    ./write_node_callsigns.sh -f -m "506311=phonetic" -m "506312=letters number"
     ./write_node_callsigns.sh -f -x 506311 # Remove an override
     ./write_node_callsigns.sh -l          # List saved overrides
 EOF
@@ -319,10 +330,13 @@ callsign_to_speech() {
 # Speak one node. Prints exactly one line on stdout per node - "OK ..." or
 # "FAIL <reason>" - which report_progress counts and displays.
 #   $2 mode: c = $3 is a callsign field (astdb or -o), t = $3 is -t text
+#   $4 / $5: 1 or 0 for this node's -P and -i (its mode, or the defaults)
 process_one_node() {
     local node=$1
     local mode=$2
     local callsign=$3
+    local PHONETIC=${4:-$PHONETIC}
+    local INCNODE=${5:-$INCNODE}
     local out="$DESTDIR/$node.ulaw"
     local tmp="$out.tmp.$$"
     local SPEECH_TEXT="" SPELLED=""
@@ -397,15 +411,34 @@ lookup_node_callsign() {
     ' "$SRCDIR/astdb.txt"
 }
 
-# resolve_with NODE_ARR CALL_ARR TEXT_ARR NODE CALLSIGN
-# Work out what to speak for a node under the given set of overrides, into
-# SPEAK_MODE and SPEAK_VALUE (see process_one_node). Returns 0 if an
-# override applies.
+# resolve_with SET NODE CALLSIGN
+# Work out what to speak for a node under a set of overrides (SET is "" for
+# the current ones or "PREV_" for the last run's) into:
+#   SPEAK_MODE, SPEAK_VALUE  what to say (see process_one_node)
+#   SPEAK_PHON, SPEAK_NUM    1 or 0 for -P and -i, after any mode entry
+#   SPEAK_WORDS              the mode entry's words, or empty
+# Returns 0 if an override or text entry applies (a mode alone doesn't count).
 resolve_with() {
-    local -n _rw_node=$1 _rw_call=$2 _rw_text=$3
-    local node=$4
-    local callsign=$5
-    local call_key=${callsign^^}
+    local -n _rw_node=${1}NODE_OVERRIDE _rw_call=${1}CALL_OVERRIDE _rw_text=${1}CUSTOM_TEXT
+    local -n _rw_nmode=${1}NODE_MODE _rw_cmode=${1}CALL_MODE
+    local node=$2
+    local callsign=$3
+    local call_key=${callsign^^} word
+
+    SPEAK_PHON=$PHONETIC SPEAK_NUM=$INCNODE SPEAK_WORDS=""
+    if [[ -n ${_rw_nmode[$node]+x} ]]; then
+        SPEAK_WORDS=${_rw_nmode[$node]}
+    elif [[ -n $call_key && -n ${_rw_cmode[$call_key]+x} ]]; then
+        SPEAK_WORDS=${_rw_cmode[$call_key]}
+    fi
+    for word in $SPEAK_WORDS; do
+        case $word in
+            phonetic) SPEAK_PHON=1 ;;
+            letters) SPEAK_PHON=0 ;;
+            number) SPEAK_NUM=1 ;;
+            no-number) SPEAK_NUM=0 ;;
+        esac
+    done
 
     SPEAK_MODE=c
     SPEAK_VALUE=$callsign
@@ -424,18 +457,35 @@ resolve_with() {
 
 # Resolve a node under the current overrides.
 resolve_node() {
-    resolve_with NODE_OVERRIDE CALL_OVERRIDE CUSTOM_TEXT "$1" "$2"
+    resolve_with "" "$1" "$2"
 }
 
 # Return 0 if the overrides make the node sound different from the last
-# run: an override for it was added, changed or removed.
+# run: an override, text or mode for it was added, changed or removed.
 override_changed() {
-    local mode value
+    local before
     (( OVERRIDES_SAME )) && return 1
-    resolve_with PREV_NODE_OVERRIDE PREV_CALL_OVERRIDE PREV_CUSTOM_TEXT "$1" "$2"
-    mode=$SPEAK_MODE value=$SPEAK_VALUE
-    resolve_node "$1" "$2"
-    [[ $mode != "$SPEAK_MODE" || $value != "$SPEAK_VALUE" ]]
+    resolve_with PREV_ "$1" "$2" || true
+    before="$SPEAK_MODE|$SPEAK_VALUE|$SPEAK_PHON|$SPEAK_NUM"
+    resolve_node "$1" "$2" || true
+    [[ $before != "$SPEAK_MODE|$SPEAK_VALUE|$SPEAK_PHON|$SPEAK_NUM" ]]
+}
+
+# Normalize mode words ("Phonetic, number") into MODE_WORDS ("phonetic
+# number"). Returns 1 for an unknown word or both words of a pair.
+parse_mode_words() {
+    local word phon="" num=""
+    for word in ${1//,/ }; do
+        case ${word,,} in
+            phonetic) [[ $phon == letters ]] && return 1; phon=phonetic ;;
+            letters) [[ $phon == phonetic ]] && return 1; phon=letters ;;
+            number) [[ $num == no-number ]] && return 1; num=number ;;
+            no-number|nonumber) [[ $num == number ]] && return 1; num=no-number ;;
+            *) return 1 ;;
+        esac
+    done
+    MODE_WORDS="$phon${phon:+${num:+ }}$num"
+    [[ -n $MODE_WORDS ]]
 }
 
 # Return 0 if the node needs (re)generating.
@@ -468,7 +518,8 @@ queue_node() {
         note=" (override removed)"
         resolve_node "$node" "$callsign" || true
     fi
-    printf '%s|%s|%s\n' "$node" "$SPEAK_MODE" "$SPEAK_VALUE" >> "$WORK_FILE"
+    [[ -n $SPEAK_WORDS ]] && note+=" (mode: $SPEAK_WORDS)"
+    printf '%s|%s|%s|%s|%s\n' "$node" "$SPEAK_MODE" "$SPEAK_VALUE" "$SPEAK_PHON" "$SPEAK_NUM" >> "$WORK_FILE"
     if [[ -z "$old" ]]; then
         printf '%s: NEW -> %s%s\n' "$node" "$SPEAK_VALUE" "$note" >> "$CHANGES_FILE"
     else
@@ -492,23 +543,29 @@ parse_override() {
 # Parse one overrides-file line into P_KIND, P_KEY and P_TEXT:
 #   override KEY = TEXT
 #   text NODE = TEXT
+#   mode KEY = WORDS      (P_TEXT is the normalized words)
 parse_override_line() {
-    [[ $1 =~ ^[[:space:]]*(override|text)[[:space:]]+([^[:space:]=]+)[[:space:]]*=[[:space:]]*(.*)$ ]] || return 1
+    [[ $1 =~ ^[[:space:]]*(override|text|mode)[[:space:]]+([^[:space:]=]+)[[:space:]]*=[[:space:]]*(.*)$ ]] || return 1
     P_KIND=${BASH_REMATCH[1]}
     P_KEY=${BASH_REMATCH[2]}
     P_TEXT=${BASH_REMATCH[3]}
     P_TEXT=${P_TEXT%"${P_TEXT##*[![:space:]]}"}
     [[ -n $P_TEXT && $P_TEXT != *\|* ]] || return 1
-    [[ $P_KIND == override || $P_KEY =~ ^[0-9]+$ ]]
+    if [[ $P_KIND == mode ]]; then
+        parse_mode_words "$P_TEXT" || return 1
+        P_TEXT=$MODE_WORDS
+    fi
+    [[ $P_KIND != text || $P_KEY =~ ^[0-9]+$ ]]
 }
 
-# load_overrides FILE NODE_ARR CALL_ARR TEXT_ARR WARN
-# Read an overrides file into the three arrays. With WARN=1, report lines
-# that can't be used.
+# load_overrides FILE SET WARN
+# Read an overrides file into a set of arrays (SET is "" for the current
+# ones or "PREV_"). With WARN=1, report lines that can't be used.
 load_overrides() {
-    local file=$1 warn=$5 line lineno=0
-    local -n _lo_node=$2 _lo_call=$3 _lo_text=$4
-    _lo_node=() _lo_call=() _lo_text=()
+    local file=$1 warn=$3 line lineno=0
+    local -n _lo_node=${2}NODE_OVERRIDE _lo_call=${2}CALL_OVERRIDE _lo_text=${2}CUSTOM_TEXT
+    local -n _lo_nmode=${2}NODE_MODE _lo_cmode=${2}CALL_MODE
+    _lo_node=() _lo_call=() _lo_text=() _lo_nmode=() _lo_cmode=()
     [[ -f $file ]] || return 0
     while IFS= read -r line || [[ -n $line ]]; do
         lineno=$((lineno + 1))
@@ -521,6 +578,8 @@ load_overrides() {
         fi
         if [[ $P_KIND == text ]]; then
             _lo_text["$P_KEY"]=$P_TEXT
+        elif [[ $P_KIND == mode ]]; then
+            if [[ $P_KEY =~ ^[0-9]+$ ]]; then _lo_nmode["$P_KEY"]=$P_TEXT; else _lo_cmode["${P_KEY^^}"]=$P_TEXT; fi
         elif [[ $P_KEY =~ ^[0-9]+$ ]]; then
             _lo_node["$P_KEY"]=$P_TEXT
         else
@@ -536,6 +595,8 @@ print_overrides() {
         for key in "${!NODE_OVERRIDE[@]}"; do printf 'override %s = %s\n' "$key" "${NODE_OVERRIDE[$key]}"; done
         for key in "${!CALL_OVERRIDE[@]}"; do printf 'override %s = %s\n' "$key" "${CALL_OVERRIDE[$key]}"; done
         for key in "${!CUSTOM_TEXT[@]}"; do printf 'text %s = %s\n' "$key" "${CUSTOM_TEXT[$key]}"; done
+        for key in "${!NODE_MODE[@]}"; do printf 'mode %s = %s\n' "$key" "${NODE_MODE[$key]}"; done
+        for key in "${!CALL_MODE[@]}"; do printf 'mode %s = %s\n' "$key" "${CALL_MODE[$key]}"; done
     } | sort
 }
 
@@ -549,6 +610,7 @@ rewrite_overrides_file() {
             "# One entry per line (see README.md):" \
             "#   override KEY = TEXT   KEY is a node number or a call sign" \
             "#   text NODE = TEXT      TEXT is spoken exactly as written" \
+            "#   mode KEY = WORDS      phonetic|letters and/or number|no-number" \
             > "$OVERRIDES_FILE" || die "Could not create $OVERRIDES_FILE"
     fi
     tmp=$(mktemp) || die "Could not create a temporary file"
@@ -562,7 +624,7 @@ rewrite_overrides_file() {
 OVERRIDE_LINE_AWK='
     function entry(line, p) {
         sub(/^[ \t]+/, "", line)
-        if (!match(line, /^(override|text)[ \t]+[^ \t=]+/)) return 0
+        if (!match(line, /^(override|text|mode)[ \t]+[^ \t=]+/)) return 0
         split(substr(line, 1, RLENGTH), p, /[ \t]+/)
         kind = p[1]; key = toupper(p[2])
         return 1
@@ -581,7 +643,7 @@ save_override() {
     log "Saved: $1 $2 = $3"
 }
 
-# Remove every entry (override or text) for a key.
+# Remove every entry (override, text or mode) for a key.
 remove_override() {
     local before after
     if [[ -f $OVERRIDES_FILE ]]; then
@@ -683,17 +745,17 @@ run_parallel() {
         # --will-cite: skip the one-time citation prompt/notice.
         # A node that fails is reported by process_one_node; it must not
         # abort the rest of the run.
-        parallel --will-cite -j "$JOBS" --colsep '[|]' process_one_node {1} {2} {3} < "$WORK_FILE" || true
+        parallel --will-cite -j "$JOBS" --colsep '[|]' process_one_node {1} {2} {3} {4} {5} < "$WORK_FILE" || true
     else
         # Batch many nodes into each spawned worker to amortize bash
         # startup overhead.
-        while IFS='|' read -r node mode callsign; do
-            printf '%s\0%s\0%s\0' "$node" "$mode" "$callsign"
+        while IFS='|' read -r node mode callsign phon num; do
+            printf '%s\0%s\0%s\0%s\0%s\0' "$node" "$mode" "$callsign" "$phon" "$num"
         done < "$WORK_FILE" \
-            | xargs -0 -n 60 -P "$JOBS" bash -c '
+            | xargs -0 -n 100 -P "$JOBS" bash -c '
                 while (( $# )); do
-                    process_one_node "$1" "$2" "$3" || true
-                    shift 3
+                    process_one_node "$1" "$2" "$3" "$4" "$5" || true
+                    shift 5
                 done
               ' _
     fi | report_progress "$total"
@@ -719,7 +781,7 @@ format_total_time() {
 }
 
 # --- options ---
-while getopts "haiPj:n:d:s:p:o:t:x:c:lfvr" OPTION; do
+while getopts "haiPj:n:d:s:p:o:t:m:x:c:lfvr" OPTION; do
     case "$OPTION" in
         o)
             parse_override o "$OPTARG"
@@ -731,6 +793,13 @@ while getopts "haiPj:n:d:s:p:o:t:x:c:lfvr" OPTION; do
             parse_override t "$OPTARG"
             [[ $OPT_KEY =~ ^[0-9]+$ ]] || die "-t key must be a node number: $OPTARG"
             EDIT_OPS+=(text) EDIT_KEYS+=("$OPT_KEY") EDIT_TEXTS+=("$OPT_TEXT")
+            ;;
+        m)
+            parse_override m "$OPTARG"
+            parse_mode_words "$OPT_TEXT" \
+                || die "-m words must be phonetic or letters, and/or number or no-number: $OPTARG"
+            [[ $OPT_KEY =~ ^[0-9]+$ ]] || OPT_KEY=${OPT_KEY^^}
+            EDIT_OPS+=(mode) EDIT_KEYS+=("$OPT_KEY") EDIT_TEXTS+=("$MODE_WORDS")
             ;;
         x)
             [[ $OPTARG =~ ^[^[:space:]=\|]+$ ]] || die "-x needs a node number or callsign, got: $OPTARG"
@@ -765,7 +834,7 @@ for i in "${!EDIT_OPS[@]}"; do
         save_override "${EDIT_OPS[i]}" "${EDIT_KEYS[i]}" "${EDIT_TEXTS[i]}"
     fi
 done
-load_overrides "$OVERRIDES_FILE" NODE_OVERRIDE CALL_OVERRIDE CUSTOM_TEXT 1
+load_overrides "$OVERRIDES_FILE" "" 1
 
 if (( LIST_ONLY )); then
     if [[ -n $(print_overrides) ]]; then
@@ -780,7 +849,7 @@ fi
 resolve_astdb_dir || die "astdb.txt not found (tried /var/lib/asterisk, /var/log/asterisk). Use -s PATH."
 [[ -z "$PREV_DB" ]] && PREV_DB="$SRCDIR/previous_astdb.txt"
 PREV_OVERRIDES="$(dirname "$PREV_DB")/previous_node_overrides.conf"
-load_overrides "$PREV_OVERRIDES" PREV_NODE_OVERRIDE PREV_CALL_OVERRIDE PREV_CUSTOM_TEXT 0
+load_overrides "$PREV_OVERRIDES" PREV_ 0
 # Fast path: nothing changed, so no node needs comparing.
 if [[ -f $PREV_OVERRIDES && $(print_overrides) == "$(< "$PREV_OVERRIDES")" ]]; then
     OVERRIDES_SAME=1
