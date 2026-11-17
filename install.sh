@@ -11,9 +11,11 @@
 #   4. Turn on ASL3's automatic astdb.txt (node database) updates
 #   5. Copy the scripts and their data files to /opt/asl-telem and link
 #      the scripts into /usr/local/bin so they are on the PATH
-#   6. Enable custom sounds in /etc/asterisk/asterisk.conf
-#   7. Point nodenames in /etc/asterisk/rpt.conf at custom/rpt/nodenames
-#   8. Check the install, then offer to generate the sounds
+#   6. Choose the speaking rate, with an optional preview played on a
+#      local node
+#   7. Enable custom sounds in /etc/asterisk/asterisk.conf
+#   8. Point nodenames in /etc/asterisk/rpt.conf at custom/rpt/nodenames
+#   9. Check the install, then offer to generate the sounds
 #
 # Run it as root from the directory that holds the scripts, or straight
 # from GitHub:
@@ -27,7 +29,7 @@
 
 set -uo pipefail
 
-VERSION=0.14
+VERSION=0.15
 REPO=borris84/asl-dectalk-telemetry
 RELEASE_URL="https://github.com/$REPO/archive/refs/tags/v$VERSION.tar.gz"
 DOWNLOAD_DIR=/usr/local/src/asl-dectalk-telemetry-$VERSION
@@ -63,12 +65,36 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 ASTERISK_RESTART_NEEDED=0
 MODE=install
 
+DEC_INIT=$INSTALL_DIR/dec-init.cfg
+ASTERISK=/usr/sbin/asterisk
+# Speaking rate presets: "label|words per minute|samples per frame".
+# [:ra] is DECtalk's speaking rate. Above about 350 words per minute DECtalk
+# shortens and drops sounds, so the two fastest presets keep a moderate
+# [:ra] and speed up the synthesizer itself with [:spf]: the percentage of
+# the normal 6.4 ms of audio produced per frame (default 100). 67 plays
+# 1.5 times as fast and 50 twice as fast, without changing the pitch.
+RATE_PRESETS=(
+    "Slowest|180|100"
+    "Slow|250|100"
+    "Normal|350|100"
+    "Faster|350|67"
+    "Fastest|300|50"
+)
+RATE_DEFAULT_CHOICE=3
+# DECtalk's own limits for [:ra].
+RATE_MIN=75
+RATE_MAX=600
+RATE_CHANGED=0
+PREVIEW_DIR=""
+PREVIEW_NODE=""
+
 die() {
     printf 'Error: %s\n' "$*" >&2
     exit 1
 }
 
 trap 'echo; echo "Installation stopped."; exit 130' INT
+trap '[[ -n $PREVIEW_DIR ]] && rm -rf -- "$PREVIEW_DIR"' EXIT
 
 # ask_yn QUESTION [y|n]  - returns 0 for yes. The optional default is used
 # when the user just presses Enter.
@@ -389,11 +415,245 @@ install_files() {
     echo "$VERSION" > "$VERSION_FILE" || die "Could not write $VERSION_FILE"
 }
 
-# --- Step 5: asterisk.conf -------------------------------------------------
+# --- Step 5: speaking rate -------------------------------------------------
+
+# rate_setting TEXT  - print "RATE SPF" from DECtalk commands in TEXT.
+# Either is printed as 0 if TEXT doesn't set it.
+rate_setting() {
+    local ra spf
+    ra=$(grep -oE '\[:ra(te)?[[:space:]]+[0-9]+\]' <<< "$1" | head -n 1 | grep -oE '[0-9]+')
+    spf=$(grep -oE '\[:spf[[:space:]]+[0-9]+\]' <<< "$1" | head -n 1 | grep -oE '[0-9]+')
+    echo "${ra:-0} ${spf:-0}"
+}
+
+# with_rate TEXT RATE SPF  - print TEXT with its [:ra] set to RATE and its
+# [:spf] set to SPF. SPF 100 (the default) removes [:spf].
+with_rate() {
+    local text=$1 ra=$2 spf=$3 cmd
+    cmd="[:ra $ra]"
+    (( spf != 100 )) && cmd+=" [:spf $spf]"
+    text=$(sed -E 's/[[:space:]]*\[:spf[[:space:]]+[0-9]+\]//g' <<< "$text")
+    if grep -qE '\[:ra(te)?[[:space:]]+[0-9]+\]' <<< "$text"; then
+        sed -E "s/\[:ra(te)?[[:space:]]+[0-9]+\]/$cmd/" <<< "$text"
+    elif [[ $text == "[:phoneme on]"* ]]; then
+        echo "[:phoneme on] $cmd${text#"[:phoneme on]"}"
+    else
+        echo "$cmd $text"
+    fi
+}
+
+# describe_rate RATE SPF  - print a short description of a rate setting.
+describe_rate() {
+    local ra=$1 spf=$2
+    if (( spf == 100 )); then
+        echo "$ra words per minute"
+    else
+        printf '%s words per minute, sped up %s times (about %s)\n' "$ra" \
+            "$(awk -v s="$spf" 'BEGIN { printf "%g", int(1000 / s + 0.5) / 10 }')" \
+            "$(( (ra * 100 / spf + 5) / 10 * 10 ))"
+    fi
+}
+
+# choose_rate RATE SPF  - show the speaking rate menu, with RATE and SPF as
+# the current setting, and put the choice in NEW_RA and NEW_SPF.
+choose_rate() {
+    local cur_ra=$1 cur_spf=$2 i label ra spf default=$RATE_DEFAULT_CHOICE
+    local count=${#RATE_PRESETS[@]} keep=0 custom matched=0 note
+    echo "Choose how fast DECtalk speaks:"
+    for i in "${!RATE_PRESETS[@]}"; do
+        IFS='|' read -r label ra spf <<< "${RATE_PRESETS[$i]}"
+        note=""
+        (( i + 1 == RATE_DEFAULT_CHOICE )) && note=" (default)"
+        if (( ra == cur_ra && spf == cur_spf )); then
+            default=$((i + 1))
+            matched=1
+            note+=" (current)"
+        fi
+        printf '  %d) %-8s %s%s\n' $((i + 1)) "$label" "$(describe_rate "$ra" "$spf")" "$note"
+    done
+    custom=$((count + 1))
+    count=$custom
+    printf '  %d) %-8s enter a rate from %d to %d words per minute\n' \
+        "$custom" "Custom" "$RATE_MIN" "$RATE_MAX"
+    # A setting made by hand that isn't one of the presets can be kept.
+    if (( ! matched && cur_ra > 0 )); then
+        keep=$((count + 1))
+        count=$keep
+        default=$keep
+        printf '  %d) Keep the current setting: %s\n' "$keep" "$(describe_rate "$cur_ra" "$cur_spf")"
+    fi
+    ask_number "$count" "$default"
+    if (( CHOICE == keep )); then
+        NEW_RA=$cur_ra
+        NEW_SPF=$cur_spf
+    elif (( CHOICE == custom )); then
+        ask_custom_rate "$cur_ra"
+        NEW_SPF=100
+    else
+        IFS='|' read -r label NEW_RA NEW_SPF <<< "${RATE_PRESETS[$((CHOICE - 1))]}"
+    fi
+}
+
+# ask_custom_rate RATE  - read a speaking rate from RATE_MIN to RATE_MAX into
+# NEW_RA, offering RATE (if it is in range) or 350 as the default.
+ask_custom_rate() {
+    local default=$1 answer
+    (( default >= RATE_MIN && default <= RATE_MAX )) || default=350
+    while true; do
+        read -r -p "Words per minute ($RATE_MIN-$RATE_MAX) [$default]: " answer \
+            || { echo; die "No answer given. Installation stopped."; }
+        [[ -z $answer ]] && answer=$default
+        if [[ $answer =~ ^[0-9]+$ ]] && (( 10#$answer >= RATE_MIN && 10#$answer <= RATE_MAX )); then
+            NEW_RA=$((10#$answer))
+            return 0
+        fi
+        echo "Please enter a number from $RATE_MIN to $RATE_MAX."
+    done
+}
+
+# Print the node numbers defined in rpt.conf: [506311] and
+# [506311](node-main) stanzas.
+rpt_nodes() {
+    sed -nE 's/^[[:space:]]*\[([0-9]+)\].*/\1/p' "$RPT_CONF"
+}
+
+# Pick a running node to play previews on and put it in PREVIEW_NODE.
+# Returns 1 (after saying why) if there is none.
+choose_preview_node() {
+    local -a nodes=()
+    local node i
+
+    if ! "$ASTERISK" -rx "core show version" > /dev/null 2>&1; then
+        echo "Asterisk is not running, so a preview can't be played."
+        return 1
+    fi
+    for node in $(rpt_nodes); do
+        "$ASTERISK" -rx "rpt show variables $node" 2> /dev/null | grep -q '^Variable listing' \
+            && nodes+=("$node")
+    done
+    if (( ${#nodes[@]} == 0 )); then
+        echo "No running node was found in $RPT_CONF, so a preview can't be played."
+        return 1
+    fi
+
+    if (( ${#nodes[@]} == 1 )); then
+        PREVIEW_NODE=${nodes[0]}
+        echo "The preview will be played on node $PREVIEW_NODE."
+        return 0
+    fi
+    echo "Which node should the preview be played on?"
+    for i in "${!nodes[@]}"; do
+        echo "  $((i + 1))) Node ${nodes[$i]}"
+    done
+    ask_number "${#nodes[@]}" 1
+    PREVIEW_NODE=${nodes[$((CHOICE - 1))]}
+}
+
+# render_preview INIT  - speak sample announcements with the DECtalk
+# commands in INIT into $PREVIEW_DIR/preview.ul, as dectalk-telemetry.sh
+# renders the prompts.
+render_preview() {
+    local init=$1 digits text out="$PREVIEW_DIR/preview.ul"
+    digits=$(sed 's/./& /g' <<< "$PREVIEW_NODE")
+    text="Node $digits. Connected to node 2 0 0 0. The time is 3 15 P M. All links disconnected."
+    "$SAY" -e 3 -fo stdout:raw -a "$init $text" < /dev/null 2> /dev/null \
+        | ffmpeg -nostdin -v error -f mulaw -ar 8000 -ac 1 -i - \
+            -af "silenceremove=start_periods=1:start_threshold=-50dB,areverse,silenceremove=start_periods=1:start_threshold=-50dB,areverse" \
+            -f mulaw -ar 8000 -ac 1 -y "$out" \
+        && [[ -s $out ]] && chmod 644 -- "$out"
+}
+
+play_preview() {
+    echo "Playing the preview on node $PREVIEW_NODE..."
+    "$ASTERISK" -rx "rpt localplay $PREVIEW_NODE $PREVIEW_DIR/preview" > /dev/null 2>&1 \
+        || echo "Asterisk could not play the preview."
+}
+
+# preview_rate INIT  - play INIT on a local node until the user decides.
+# Returns 0 to use this rate, 1 to choose another.
+preview_rate() {
+    local init=$1
+    if [[ -z $PREVIEW_DIR ]]; then
+        # Asterisk runs as its own user, so the preview must be somewhere
+        # it can read.
+        PREVIEW_DIR=$(mktemp -d "$INSTALL_DIR/preview.XXXXXX") \
+            && chmod 755 -- "$PREVIEW_DIR" \
+            || { echo "Could not create a folder for the preview."; PREVIEW_DIR=""; return 0; }
+    fi
+    if ! render_preview "$init"; then
+        echo "DECtalk could not make the preview."
+        return 0
+    fi
+    play_preview
+    while true; do
+        echo
+        echo "  1) Play it again"
+        echo "  2) Choose a different speaking rate"
+        echo "  3) Use this speaking rate"
+        ask_number 3 3
+        case $CHOICE in
+            1) play_preview ;;
+            2) return 1 ;;
+            3) return 0 ;;
+        esac
+    done
+}
+
+step_speaking_rate() {
+    local cfg cur_ra cur_spf new_cfg tmp preview=0
+    step 5 "Speaking rate"
+
+    if [[ ! -f $DEC_INIT ]]; then
+        echo "$DEC_INIT not found. Skipped."
+        return
+    fi
+    cfg=$(< "$DEC_INIT")
+    read -r cur_ra cur_spf <<< "$(rate_setting "$cfg")"
+    (( cur_spf == 0 )) && cur_spf=100
+
+    echo "DECtalk becomes hard to understand above about 350 words per minute."
+    echo "The Faster and Fastest settings keep a moderate rate and speed up the"
+    echo "synthesizer itself instead, which stays clearer."
+    echo
+    while true; do
+        choose_rate "$cur_ra" "$cur_spf"
+        new_cfg=$(with_rate "$cfg" "$NEW_RA" "$NEW_SPF")
+
+        # Asked once: after "choose a different rate" the loop goes
+        # straight back to the preview.
+        if (( ! preview )); then
+            echo
+            echo "You can hear a preview of this rate on a node on this system."
+            echo "It is played like any other announcement, so it is transmitted"
+            echo "if the node has a radio."
+            if ask_yn "Preview the speaking rate on a local node?" y; then
+                choose_preview_node && preview=1
+            fi
+        fi
+        if (( preview )) && ! preview_rate "$(tr '\r\n' '  ' <<< "$new_cfg")"; then
+            echo
+            continue
+        fi
+        break
+    done
+
+    if [[ $new_cfg == "$cfg" ]]; then
+        echo "The speaking rate is unchanged: $(describe_rate "$NEW_RA" "$NEW_SPF")."
+        return
+    fi
+    backup_file "$DEC_INIT"
+    tmp=$(mktemp) || die "Could not create a temporary file"
+    printf '%s\n' "$new_cfg" > "$tmp" || die "Could not write $tmp"
+    replace_contents "$DEC_INIT" "$tmp"
+    echo "Speaking rate set to $(describe_rate "$NEW_RA" "$NEW_SPF")."
+    RATE_CHANGED=1
+}
+
+# --- Step 6: asterisk.conf -------------------------------------------------
 
 step_asterisk_conf() {
     local tmp line
-    step 5 "Allow custom sounds in $ASTERISK_CONF"
+    step 6 "Allow custom sounds in $ASTERISK_CONF"
 
     if custom_sounds_enabled; then
         echo "Custom sounds are already enabled (sounds_search_custom_dir = yes)."
@@ -426,12 +686,12 @@ step_asterisk_conf() {
     ASTERISK_RESTART_NEEDED=1
 }
 
-# --- Step 6: rpt.conf ------------------------------------------------------
+# --- Step 7: rpt.conf ------------------------------------------------------
 
 step_rpt_conf() {
     local values tmp line header
     local setting="nodenames = $NODENAMES_DIR ; DECtalk node name announcements"
-    step 6 "Point node names in $RPT_CONF at $NODENAMES_DIR"
+    step 7 "Point node names in $RPT_CONF at $NODENAMES_DIR"
 
     if nodenames_configured; then
         echo "nodenames is already set to $NODENAMES_DIR."
@@ -488,10 +748,10 @@ step_rpt_conf() {
     ASTERISK_RESTART_NEEDED=1
 }
 
-# --- Step 7: verify --------------------------------------------------------
+# --- Step 8: verify --------------------------------------------------------
 
 step_verify() {
-    step 7 "Check the installation"
+    step 8 "Check the installation"
     if ! run_checks; then
         echo "Fix them and run this installer again before generating the sounds."
         return 1
@@ -534,11 +794,11 @@ run_checks() {
     fi
 }
 
-# --- Step 8: generate sounds -----------------------------------------------
+# --- Step 9: generate sounds -----------------------------------------------
 
 step_generate() {
     local -a args=(-a)
-    step 8 "Generate the sounds"
+    step 9 "Generate the sounds"
 
     echo "The telemetry prompts must be generated before the node names."
     echo "$TELEM_SCRIPT can rename or delete the whole custom sounds"
@@ -554,6 +814,8 @@ step_generate() {
     echo "Node names are generated for every node in the AllStarLink node"
     echo "database. A full build can take a long time on a Raspberry Pi."
     if ask_yn "Generate the node name announcements now ($NODES_SCRIPT)?" y; then
+        # Existing announcements are only rebuilt with -r.
+        (( RATE_CHANGED )) && args+=(-r)
         echo
         echo "Each announcement can be followed by the node number,"
         echo "for example \"N 2 D Y I, node 5 0 6 3 1 1\"."
@@ -666,10 +928,11 @@ echo "  1. Install DECtalk if it is not already working"
 echo "  2. Install ffmpeg and perl if they are missing"
 echo "  3. Turn on automatic updates of the node database ($ASTDB)"
 echo "  4. Copy the scripts to $INSTALL_DIR and put them on the PATH"
-echo "  5. Allow custom sounds in $ASTERISK_CONF"
-echo "  6. Point node names in $RPT_CONF at $NODENAMES_DIR"
-echo "  7. Check that everything is installed"
-echo "  8. Offer to generate the telemetry and node name sounds"
+echo "  5. Choose the speaking rate, with an optional preview on your node"
+echo "  6. Allow custom sounds in $ASTERISK_CONF"
+echo "  7. Point node names in $RPT_CONF at $NODENAMES_DIR"
+echo "  8. Check that everything is installed"
+echo "  9. Offer to generate the telemetry and node name sounds"
 echo
 echo "You will be asked before each change. Config files are backed up first."
 echo
@@ -679,6 +942,7 @@ step_dectalk
 step_packages
 step_node_database
 step_scripts
+step_speaking_rate
 step_asterisk_conf
 step_rpt_conf
 step_verify && step_generate

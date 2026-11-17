@@ -2,7 +2,7 @@
 
 DECtalk voice telemetry and node name announcements for AllStarLink 3 (ASL3).
 
-Version 0.14
+Version 0.15
 
 This project replaces the stock ASL3 telemetry voice with DECtalk. It also
 builds a spoken announcement for every node in the AllStarLink node
@@ -43,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main
 ```
 
 The installer downloads the release files to
-`/usr/local/src/asl-dectalk-telemetry-0.14` and runs from there.
+`/usr/local/src/asl-dectalk-telemetry-0.15` and runs from there.
 
 ### Install from a copy of the repository
 
@@ -108,16 +108,22 @@ steps are detected and skipped.
    `dec-init.cfg` or `prompt-list.txt` since a previous install, it asks
    whether to keep your copy or replace it. Your `node-overrides.conf` is
    never replaced.
-6. **Enables custom sounds** by setting `sounds_search_custom_dir = yes` in
+6. **Sets the speaking rate** in `dec-init.cfg` (see
+   [Changing the voice](#changing-the-voice)). You can hear a preview first:
+   it is played on a node on this system with `rpt localplay`, like any
+   other announcement, so it is transmitted if the node has a radio. If
+   there are several nodes in `/etc/asterisk/rpt.conf`, you choose one.
+   After the preview you can play it again, try another rate, or keep it.
+7. **Enables custom sounds** by setting `sounds_search_custom_dir = yes` in
    `/etc/asterisk/asterisk.conf`.
-7. **Points node names at the new announcements** by setting
+8. **Points node names at the new announcements** by setting
    `nodenames = /usr/share/asterisk/sounds/custom/rpt/nodenames` in the
    `[node-main]` template of `/etc/asterisk/rpt.conf`. Existing node name
    sounds elsewhere are not changed or deleted.
-8. **Checks the installation** and lists anything that is wrong.
-9. **Offers to generate the sounds.** The telemetry prompts are generated
-   first, then the node names (see below for why the order matters).
-10. **Offers to restart Asterisk** if a config file was changed. Restarting
+9. **Checks the installation** and lists anything that is wrong.
+10. **Offers to generate the sounds.** The telemetry prompts are generated
+    first, then the node names (see below for why the order matters).
+11. **Offers to restart Asterisk** if a config file was changed. Restarting
     drops any active connections, so you can choose to do it later with
     `systemctl restart asterisk`.
 
@@ -436,7 +442,24 @@ of every prompt and announcement. The default is:
 ```
 
 `[:ra 350]` is the speaking rate in words per minute, and the `[:dv ...]`
-commands set the voice's pitch and stress. See the DECtalk documentation in
+commands set the voice's pitch and stress.
+
+The installer can set the speaking rate for you:
+
+| Choice | Setting | About |
+|--------|---------|-------|
+| Slowest | `[:ra 180]` | 180 words per minute |
+| Slow | `[:ra 250]` | 250 words per minute |
+| Normal (default) | `[:ra 350]` | 350 words per minute |
+| Faster | `[:ra 350] [:spf 67]` | 520 words per minute |
+| Fastest | `[:ra 300] [:spf 50]` | 600 words per minute |
+| Custom | `[:ra 75]` to `[:ra 600]` | the rate you enter, 75 to 600 words per minute |
+
+DECtalk drops and slurs sounds above about 350 words per minute.
+`[:spf]` speeds up the synthesizer instead: it is the percentage of the
+normal amount of audio produced for each 6.4 ms frame (default 100, from 1
+to 500). Lower is faster: 67 plays 1.5 times as fast and 50 twice as fast,
+without changing the pitch. See the DECtalk documentation in
 `/opt/dectalk/doc` for all the commands. After changing it, regenerate
 everything:
 
