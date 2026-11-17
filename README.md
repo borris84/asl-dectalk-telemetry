@@ -2,7 +2,7 @@
 
 DECtalk voice telemetry and node name announcements for AllStarLink 3 (ASL3).
 
-Version 0.10
+Version 0.11
 
 This project replaces the stock ASL3 telemetry voice with DECtalk. It also
 builds a spoken announcement for every node in the AllStarLink node
@@ -17,6 +17,7 @@ It contains:
 | `write_node_callsigns_dectalk.sh` | Generates a DECtalk announcement for each node in the ASL node database. |
 | `prompt-list.txt` | The telemetry prompts: a sound file name and the text DECtalk speaks for it. |
 | `dec-init.cfg` | DECtalk voice settings (speaking rate, pitch and so on) used by both scripts. |
+| `node-overrides.conf` | Your saved node announcement overrides (empty to start with). |
 
 ## Requirements
 
@@ -42,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main
 ```
 
 The installer downloads the release files to
-`/usr/local/src/asl-dectalk-telemetry-0.10` and runs from there.
+`/usr/local/src/asl-dectalk-telemetry-0.11` and runs from there.
 
 ### Install from a copy of the repository
 
@@ -70,22 +71,61 @@ steps are detected and skipped.
    because `/tmp` is too small on many Pis, and that folder is removed
    afterwards.
 3. **Installs ffmpeg and perl** if they are missing.
-4. **Installs the scripts** in `/opt/asl-telem`, with links in
+4. **Turns on automatic node database updates** so that
+   `/var/lib/asterisk/astdb.txt` exists and stays current (see
+   [The node database](#the-node-database-astdbtxt)).
+5. **Installs the scripts** in `/opt/asl-telem`, with links in
    `/usr/local/bin` so you can run them from anywhere. If you have edited
    `dec-init.cfg` or `prompt-list.txt` since a previous install, it asks
-   whether to keep your copy or replace it.
-5. **Enables custom sounds** by setting `sounds_search_custom_dir = yes` in
+   whether to keep your copy or replace it. Your `node-overrides.conf` is
+   never replaced.
+6. **Enables custom sounds** by setting `sounds_search_custom_dir = yes` in
    `/etc/asterisk/asterisk.conf`.
-6. **Points node names at the new announcements** by setting
+7. **Points node names at the new announcements** by setting
    `nodenames = /usr/share/asterisk/sounds/custom/rpt/nodenames` in the
    `[node-main]` template of `/etc/asterisk/rpt.conf`. Existing node name
    sounds elsewhere are not changed or deleted.
-7. **Checks the installation** and lists anything that is wrong.
-8. **Offers to generate the sounds.** The telemetry prompts are generated
+8. **Checks the installation** and lists anything that is wrong.
+9. **Offers to generate the sounds.** The telemetry prompts are generated
    first, then the node names (see below for why the order matters).
-9. **Offers to restart Asterisk** if a config file was changed. Restarting
-   drops any active connections, so you can choose to do it later with
-   `systemctl restart asterisk`.
+10. **Offers to restart Asterisk** if a config file was changed. Restarting
+    drops any active connections, so you can choose to do it later with
+    `systemctl restart asterisk`.
+
+## The node database (astdb.txt)
+
+`write_node_callsigns_dectalk.sh` reads each node's call sign from
+`/var/lib/asterisk/astdb.txt`. ASL3 downloads this file from AllStarLink
+with the `asl3-update-astdb` service and timer, part of the
+`asl3-update-nodelist` package. **Both are turned off by default.**
+
+The installer turns them on for you. To do it by hand, as described in the
+`asl3-update-astdb` man page (`man asl3-update-astdb`):
+
+```sh
+sudo systemctl enable asl3-update-astdb.service
+sudo systemctl enable asl3-update-astdb.timer
+sudo systemctl start asl3-update-astdb.timer
+```
+
+The timer then downloads the file at every boot and every 6 hours. To
+download it right away:
+
+```sh
+sudo systemctl start asl3-update-astdb.service
+```
+
+To check that the timer is running and see when it runs next:
+
+```sh
+systemctl list-timers asl3-update-astdb.timer
+```
+
+Private nodes (such as 1000 to 1999) aren't in the AllStarLink database.
+To give them a call sign, add them to `/etc/asterisk/privatenodes.txt`, one
+per line in the same `node|callsign|frequency|location` format as
+`astdb.txt`. `asl3-update-astdb` adds them to `astdb.txt` on every update.
+You can also give a private node an announcement with an override (below).
 
 ## Generating the telemetry prompts
 
@@ -156,55 +196,116 @@ How the call sign field is spoken:
 | `-d PATH` | Folder to write announcements to. |
 | `-s PATH` | Folder that holds `astdb.txt`. |
 | `-p PATH` | Where to keep the previous copy of the database. |
-| `-o KEY=TEXT` | Override what is spoken for a node. See below. |
-| `-t NODE=TEXT` | Speak custom text for a node. See below. |
+| `-o KEY=TEXT` | Save an override of what is spoken for a node or call sign. See below. |
+| `-t NODE=TEXT` | Save custom text for a node. See below. |
+| `-x KEY` | Remove the saved override for a node or call sign. |
+| `-l` | List the saved overrides. |
+| `-c PATH` | Use a different overrides file. |
 | `-h` | Show help. |
 
 ### Overriding a node's announcement
 
-When several nodes share a call sign, they all sound the same. `-o` replaces
-the call sign field from the database before it is spoken, so you can tell
-them apart. The text is still handled like a call sign field, so call signs
-in it are spelled out.
+When several nodes share a call sign, they all sound the same. An override
+replaces what is spoken for a node, so you can tell them apart. Overrides
+are saved in `/opt/asl-telem/node-overrides.conf` and applied every time the
+script runs.
+
+There are two kinds of override:
+
+- **override** replaces the call sign field from the database. It can be
+  for one node number, or for a call sign (every node with that call sign).
+  The text is still handled like a call sign field, so call signs in it are
+  spelled out.
+- **text** speaks the text exactly as written for one node, with no call
+  sign spelling. DECtalk commands such as `[:ra 200]` can be used in it.
+
+For the same node, a text entry wins over an override, and a node-number
+override wins over a call sign override.
+
+#### Adding overrides from the command line
+
+`-o` and `-t` save the override to the file, then rebuild the nodes it
+affects. Both can be given more than once.
 
 ```sh
 # Every node with call sign N2DYI
 sudo write_node_callsigns_dectalk.sh -o "N2DYI=N2DYI repeater"
 
-# Just node 506311 (this wins over the call sign override above)
-sudo write_node_callsigns_dectalk.sh -o "506311=N2DYI hub" -o "N2DYI=N2DYI repeater"
-```
+# Just node 506311 (wins over the call sign override above)
+sudo write_node_callsigns_dectalk.sh -o "506311=N2DYI hub"
 
-`-t` speaks the text exactly as written, with no call sign spelling.
-DECtalk commands such as `[:ra 200]` can be used in it.
-
-```sh
+# Custom text for private node 1999
 sudo write_node_callsigns_dectalk.sh -t "1999=the lab node"
 ```
 
-Notes:
+Giving `-o` or `-t` again for the same node or call sign replaces the saved
+text.
 
-- `-o` and `-t` can be given more than once.
-- `-t` wins over `-o` for the same node.
-- `-o NODE=` and `-t` also work for nodes that aren't in the database, such
-  as private nodes.
-- Nodes with an override are regenerated every time the script runs.
-- Overrides aren't saved. Give them each time you run the script, or put
-  the command in a cron job (below).
-- After removing an override, rebuild that node with `-n NODE -r`.
-- The text can't contain `|`.
+#### Listing and removing overrides
+
+```sh
+sudo write_node_callsigns_dectalk.sh -l            # list saved overrides
+sudo write_node_callsigns_dectalk.sh -x 506311     # remove the override for node 506311
+sudo write_node_callsigns_dectalk.sh -x N2DYI      # remove the override for call sign N2DYI
+```
+
+`-x` removes both kinds of entry for that node or call sign, then rebuilds
+the affected nodes as they would sound without it. If a node isn't in the
+database and its override is removed, its announcement is deleted.
+
+#### Editing the overrides file
+
+You can also edit `/opt/asl-telem/node-overrides.conf` with any text
+editor, for example to add many overrides at once:
+
+```sh
+sudo nano /opt/asl-telem/node-overrides.conf
+```
+
+The format is one entry per line:
+
+```text
+# Lines starting with # and blank lines are ignored.
+override N2DYI = N2DYI repeater
+override 506311 = N2DYI hub
+text 1999 = the lab node
+text 1998 = the [:ra 200] test node
+```
+
+- `override KEY = TEXT`: KEY is a node number or a call sign. Call signs
+  are matched in any case.
+- `text NODE = TEXT`: NODE must be a node number.
+- Spaces around `=` are optional.
+- TEXT can't contain `|`.
+- If the same node or call sign is listed twice, the last line wins.
+- A line that doesn't match the format is skipped with a warning.
+
+After saving the file, run the script to apply the changes:
+
+```sh
+sudo write_node_callsigns_dectalk.sh
+```
+
+Only nodes whose override was added, changed or removed are rebuilt. The
+script keeps a copy of the overrides it last applied in
+`/var/lib/asterisk/previous_node_overrides.conf` to work this out. A run
+with `-n NODE` only rebuilds that node and doesn't update this copy, so the
+next full run still applies any other changes.
 
 ### Keeping node names up to date
 
-ASL3 updates `astdb.txt` regularly. To pick up new and changed nodes,
-run the script from cron, for example every night at 3:00. Edit root's
-crontab with `sudo crontab -e` and add:
+Once node database updates are on (see
+[The node database](#the-node-database-astdbtxt)), `astdb.txt` is updated
+every 6 hours. To pick up new and changed nodes, run the script from cron,
+for example every night at 3:00. Edit root's crontab with
+`sudo crontab -e` and add:
 
 ```text
 0 3 * * * /usr/local/bin/write_node_callsigns_dectalk.sh -f
 ```
 
-Add any `-i`, `-o` or `-t` options you use to the same line.
+If you use `-i`, add it to the same line. Overrides don't need to be
+given, because they are read from the overrides file.
 
 ## Changing the voice
 
@@ -227,11 +328,13 @@ sudo write_node_callsigns_dectalk.sh -a -r
 
 ## Uninstalling
 
-Remove what the installer added:
+Remove what the installer added. This also deletes your
+`node-overrides.conf`, so copy it somewhere first if you want to keep it.
 
 ```sh
 sudo rm -f /usr/local/bin/dectalk-telemetry.sh /usr/local/bin/write_node_callsigns_dectalk.sh
 sudo rm -rf /opt/asl-telem
+sudo rm -f /var/lib/asterisk/previous_astdb.txt /var/lib/asterisk/previous_node_overrides.conf
 ```
 
 Then, if you no longer want them:
@@ -241,6 +344,9 @@ Then, if you no longer want them:
   `sounds_search_custom_dir` lines.
 - Remove the generated sounds in `/usr/share/asterisk/sounds/custom`.
 - Remove DECtalk: `sudo rm -rf /opt/dectalk /usr/local/bin/say`.
+- Turn off node database updates, if nothing else uses them (Supermon and
+  AllScan do):
+  `sudo systemctl disable --now asl3-update-astdb.timer asl3-update-astdb.service`.
 
 Restart Asterisk afterwards with `sudo systemctl restart asterisk`.
 

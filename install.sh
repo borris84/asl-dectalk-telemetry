@@ -8,11 +8,12 @@
 #   1. Check that this is ASL3 (and not HamVoIP)
 #   2. Build and install DECtalk's "say" if it is not already working
 #   3. Install ffmpeg and perl if missing (the scripts need them)
-#   4. Copy the scripts and their data files to /opt/asl-telem and link
+#   4. Turn on ASL3's automatic astdb.txt (node database) updates
+#   5. Copy the scripts and their data files to /opt/asl-telem and link
 #      the scripts into /usr/local/bin so they are on the PATH
-#   5. Enable custom sounds in /etc/asterisk/asterisk.conf
-#   6. Point nodenames in /etc/asterisk/rpt.conf at custom/rpt/nodenames
-#   7. Check the install, then offer to generate the sounds
+#   6. Enable custom sounds in /etc/asterisk/asterisk.conf
+#   7. Point nodenames in /etc/asterisk/rpt.conf at custom/rpt/nodenames
+#   8. Check the install, then offer to generate the sounds
 #
 # Run it as root from the directory that holds the scripts, or straight
 # from GitHub:
@@ -22,7 +23,7 @@
 
 set -uo pipefail
 
-VERSION=0.10
+VERSION=0.11
 REPO=borris84/asl-dectalk-telemetry
 RELEASE_URL="https://github.com/$REPO/archive/refs/tags/v$VERSION.tar.gz"
 DOWNLOAD_DIR=/usr/local/src/asl-dectalk-telemetry-$VERSION
@@ -43,11 +44,15 @@ BUILD_DIR=/usr/local/src/dectalk-build
 ASTERISK_CONF=/etc/asterisk/asterisk.conf
 RPT_CONF=/etc/asterisk/rpt.conf
 NODENAMES_DIR=/usr/share/asterisk/sounds/custom/rpt/nodenames
+ASTDB=/var/lib/asterisk/astdb.txt
+ASTDB_UNITS=(asl3-update-astdb.service asl3-update-astdb.timer)
 
 TELEM_SCRIPT=dectalk-telemetry.sh
 NODES_SCRIPT=write_node_callsigns_dectalk.sh
 SCRIPTS=("$TELEM_SCRIPT" "$NODES_SCRIPT")
 DATA_FILES=(dec-init.cfg prompt-list.txt)
+# Installed only if missing: the user's own settings, never replaced.
+USER_FILES=(node-overrides.conf)
 
 STAMP=$(date +%Y%m%d-%H%M%S)
 ASTERISK_RESTART_NEEDED=0
@@ -139,6 +144,12 @@ dectalk_works() {
 
 custom_sounds_enabled() {
     grep -Eq '^[[:space:]]*sounds_search_custom_dir[[:space:]]*=[[:space:]]*yes' "$ASTERISK_CONF"
+}
+
+# Return 0 if ASL3's astdb.txt updates are enabled and the timer is running.
+astdb_updates_on() {
+    systemctl is-enabled --quiet asl3-update-astdb.timer 2> /dev/null \
+        && systemctl is-active --quiet asl3-update-astdb.timer
 }
 
 # Print the values of the active (uncommented) nodenames lines in rpt.conf.
@@ -255,11 +266,59 @@ step_packages() {
         || die "Could not install ${missing[*]}"
 }
 
-# --- Step 3: scripts -------------------------------------------------------
+# --- Step 3: node database -------------------------------------------------
+
+step_node_database() {
+    local nodes
+    step 3 "AllStarLink node database ($ASTDB)"
+
+    if ! dpkg-query -W -f='${Status}' asl3-update-nodelist 2> /dev/null | grep -q 'install ok installed'; then
+        echo "The asl3-update-nodelist package, which downloads $ASTDB,"
+        echo "is not installed."
+        ask_yn "Install it now?" y || die "$NODES_SCRIPT needs $ASTDB. Installation stopped."
+        apt-get update || die "apt-get update failed"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y asl3-update-nodelist \
+            || die "Could not install asl3-update-nodelist"
+    fi
+
+    if astdb_updates_on && [[ -s $ASTDB ]]; then
+        echo "Automatic node database updates are already on."
+        return
+    fi
+
+    echo "$NODES_SCRIPT reads each node's call sign from $ASTDB."
+    echo "ASL3 downloads that file with the asl3-update-astdb service and timer,"
+    echo "which are turned off by default. Turning them on downloads the file"
+    echo "now, then again at every boot and every 6 hours."
+    echo
+    if ! ask_yn "Turn on automatic node database updates?" y; then
+        if [[ -s $ASTDB ]]; then
+            echo "Skipped. $ASTDB will not be kept up to date, so new and changed nodes won't be announced."
+        else
+            echo "Skipped. $NODES_SCRIPT will not work until $ASTDB exists."
+        fi
+        return
+    fi
+
+    # As in the asl3-update-astdb(1) man page.
+    systemctl enable "${ASTDB_UNITS[@]}" || die "Could not enable ${ASTDB_UNITS[*]}"
+    systemctl start asl3-update-astdb.timer || die "Could not start asl3-update-astdb.timer"
+
+    echo "Downloading the node database..."
+    if systemctl start asl3-update-astdb.service && [[ -s $ASTDB ]]; then
+        nodes=$(grep -c '^[0-9]' "$ASTDB")
+        echo "$ASTDB is up to date ($nodes nodes)."
+    else
+        echo "The download failed. Check the internet connection, then run:"
+        echo "  systemctl start asl3-update-astdb.service"
+    fi
+}
+
+# --- Step 4: scripts -------------------------------------------------------
 
 step_scripts() {
     local f src dest link
-    step 3 "Install the scripts"
+    step 4 "Install the scripts"
 
     echo "The scripts and their data files will be copied to $INSTALL_DIR,"
     echo "and the scripts will be linked into $BIN_DIR so they can be run"
@@ -295,6 +354,16 @@ step_scripts() {
         echo "Installed $dest"
     done
 
+    for f in "${USER_FILES[@]}"; do
+        dest="$INSTALL_DIR/$f"
+        if [[ -f $dest ]]; then
+            echo "Kept your $dest"
+        else
+            install -m 644 -- "$SRC_DIR/$f" "$dest" || die "Could not copy $f"
+            echo "Installed $dest"
+        fi
+    done
+
     for f in "${SCRIPTS[@]}"; do
         link="$BIN_DIR/$f"
         if [[ -e $link && ! -L $link ]]; then
@@ -306,11 +375,11 @@ step_scripts() {
     done
 }
 
-# --- Step 4: asterisk.conf -------------------------------------------------
+# --- Step 5: asterisk.conf -------------------------------------------------
 
 step_asterisk_conf() {
     local tmp line
-    step 4 "Allow custom sounds in $ASTERISK_CONF"
+    step 5 "Allow custom sounds in $ASTERISK_CONF"
 
     if custom_sounds_enabled; then
         echo "Custom sounds are already enabled (sounds_search_custom_dir = yes)."
@@ -343,12 +412,12 @@ step_asterisk_conf() {
     ASTERISK_RESTART_NEEDED=1
 }
 
-# --- Step 5: rpt.conf ------------------------------------------------------
+# --- Step 6: rpt.conf ------------------------------------------------------
 
 step_rpt_conf() {
     local values tmp line header
     local setting="nodenames = $NODENAMES_DIR ; DECtalk node name announcements"
-    step 5 "Point node names in $RPT_CONF at $NODENAMES_DIR"
+    step 6 "Point node names in $RPT_CONF at $NODENAMES_DIR"
 
     if nodenames_configured; then
         echo "nodenames is already set to $NODENAMES_DIR."
@@ -405,11 +474,11 @@ step_rpt_conf() {
     ASTERISK_RESTART_NEEDED=1
 }
 
-# --- Step 6: verify --------------------------------------------------------
+# --- Step 7: verify --------------------------------------------------------
 
 step_verify() {
     local problems=0 f
-    step 6 "Check the installation"
+    step 7 "Check the installation"
 
     check() {
         if eval "$2"; then
@@ -429,6 +498,8 @@ step_verify() {
     for f in "${DATA_FILES[@]}"; do
         check "$INSTALL_DIR/$f is present" "[[ -f $INSTALL_DIR/$f ]]"
     done
+    check "Node database updates are on (asl3-update-astdb.timer)" astdb_updates_on
+    check "$ASTDB is present" "[[ -s $ASTDB ]]"
     check "Custom sounds are enabled in $ASTERISK_CONF" custom_sounds_enabled
     check "nodenames is set in $RPT_CONF" nodenames_configured
 
@@ -441,11 +512,11 @@ step_verify() {
     echo "Everything is installed."
 }
 
-# --- Step 7: generate sounds -----------------------------------------------
+# --- Step 8: generate sounds -----------------------------------------------
 
 step_generate() {
     local -a args=(-a)
-    step 7 "Generate the sounds"
+    step 8 "Generate the sounds"
 
     echo "The telemetry prompts must be generated before the node names."
     echo "$TELEM_SCRIPT can rename or delete the whole custom sounds"
@@ -483,7 +554,7 @@ is_asl3 || die "AllStarLink 3 (ASL3) is not installed (package 'asl3' not found)
 [[ -f $RPT_CONF ]] || die "$RPT_CONF not found. Nothing was changed."
 
 have_files=1
-for f in "${SCRIPTS[@]}" "${DATA_FILES[@]}"; do
+for f in "${SCRIPTS[@]}" "${DATA_FILES[@]}" "${USER_FILES[@]}"; do
     [[ -n $SRC_DIR && -f $SRC_DIR/$f ]] || have_files=0
 done
 if (( ! have_files )); then
@@ -506,11 +577,12 @@ echo
 echo "This will:"
 echo "  1. Install DECtalk if it is not already working"
 echo "  2. Install ffmpeg and perl if they are missing"
-echo "  3. Copy the scripts to $INSTALL_DIR and put them on the PATH"
-echo "  4. Allow custom sounds in $ASTERISK_CONF"
-echo "  5. Point node names in $RPT_CONF at $NODENAMES_DIR"
-echo "  6. Check that everything is installed"
-echo "  7. Offer to generate the telemetry and node name sounds"
+echo "  3. Turn on automatic updates of the node database ($ASTDB)"
+echo "  4. Copy the scripts to $INSTALL_DIR and put them on the PATH"
+echo "  5. Allow custom sounds in $ASTERISK_CONF"
+echo "  6. Point node names in $RPT_CONF at $NODENAMES_DIR"
+echo "  7. Check that everything is installed"
+echo "  8. Offer to generate the telemetry and node name sounds"
 echo
 echo "You will be asked before each change. Config files are backed up first."
 echo
@@ -518,6 +590,7 @@ ask_yn "Start the installation?" y || { echo "Nothing was changed."; exit 0; }
 
 step_dectalk
 step_packages
+step_node_database
 step_scripts
 step_asterisk_conf
 step_rpt_conf

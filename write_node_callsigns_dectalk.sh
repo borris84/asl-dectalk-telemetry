@@ -28,9 +28,14 @@
 #   - Resume-safe: skip existing .ulaw unless callsign changed or -r
 #   - Durable previous-db beside astdb.txt (not /tmp)
 #   - Auto-locate astdb in /var/lib/asterisk or /var/log/asterisk
-#   - Per-node overrides: -o replaces the astdb callsign field for a node
-#     (or for every node with a given callsign), -t speaks custom text
-#   - -a / -n / -i / -o / -t / -v / -j / -r / -s / -p
+#   - Per-node overrides, saved in node-overrides.conf beside this script:
+#     "override" replaces the astdb callsign field for a node (or for every
+#     node with a given callsign), "text" speaks custom text. -o / -t save
+#     an override, -x removes one, -l lists them.
+#   - Only nodes whose override was added, changed or removed since the
+#     last run are rebuilt (the applied overrides are kept beside the
+#     previous-db).
+#   - -a / -n / -i / -o / -t / -x / -l / -c / -v / -j / -r / -s / -p
 
 set -euo pipefail
 
@@ -41,8 +46,11 @@ export LC_ALL=C
 SRCDIR=""
 DESTDIR="/usr/share/asterisk/sounds/custom/rpt/nodenames"
 SAY="/usr/local/bin/say"
-# readlink -f: find dec-init.cfg beside the real script, not a PATH symlink
-INIT_CFG="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/dec-init.cfg"
+# readlink -f: find the config files beside the real script, not a PATH symlink
+SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+INIT_CFG="$SCRIPT_DIR/dec-init.cfg"
+OVERRIDES_FILE="$SCRIPT_DIR/node-overrides.conf"
+PREV_OVERRIDES=""
 DECTALK_INIT=""
 PREV_DB=""
 JOBS="$(nproc 2>/dev/null || echo 4)"
@@ -55,11 +63,17 @@ FORCE_RUN=0
 FORCE_REBUILD=0
 PROCESS_ALL=0
 SINGLE_NODE=""
+LIST_ONLY=0
 
 declare -A PREV_CALLSIGNS
-declare -A NODE_OVERRIDE    # node -> replacement callsign field (-o NODE=...)
-declare -A CALL_OVERRIDE    # CALLSIGN -> replacement callsign field (-o CALL=...)
-declare -A CUSTOM_TEXT      # node -> text spoken as-is (-t NODE=...)
+# Overrides from the overrides file, and the ones applied by the last run.
+declare -A NODE_OVERRIDE PREV_NODE_OVERRIDE  # node -> replacement callsign field
+declare -A CALL_OVERRIDE PREV_CALL_OVERRIDE  # CALLSIGN -> replacement callsign field
+declare -A CUSTOM_TEXT PREV_CUSTOM_TEXT      # node -> text spoken as-is
+OVERRIDES_SAME=0
+# -o / -t / -x edits to the overrides file, applied in command line order
+EDIT_OPS=() EDIT_KEYS=() EDIT_TEXTS=()
+REMOVE_NODES=()
 
 usage() {
     cat << EOF
@@ -77,21 +91,27 @@ OPTIONS:
    -r          Force regenerate even when output already exists
    -s PATH     Directory containing astdb.txt
    -p PATH     Previous-db path used for change detection
-   -o KEY=TEXT Override the astdb callsign field. KEY is a node number
-               (that node only) or a callsign (every node with that
-               callsign). TEXT is handled like an astdb entry, so call
+   -o KEY=TEXT Save an override of the astdb callsign field. KEY is a
+               node number (that node only) or a callsign (every node with
+               that callsign). TEXT is handled like an astdb entry, so call
                signs in it are still spelled out. A node-number override
                wins over a callsign override. Repeatable.
    -t NODE=TEXT
-               Speak TEXT as-is for NODE, with no call sign spelling.
-               DECtalk [:commands] and [phonemes] are allowed. Wins over
-               -o. Repeatable.
+               Save custom text for NODE, spoken as-is with no call sign
+               spelling. DECtalk [:commands] and [phonemes] are allowed.
+               Wins over -o. Repeatable.
+   -x KEY      Remove the saved override(s) for KEY (a node number or a
+               callsign). Repeatable.
+   -l          List the saved overrides and exit (after any -o/-t/-x).
+   -c PATH     Overrides file (default: $OVERRIDES_FILE)
 
 Output files are raw headerless u-law (.ulaw), spoken by DECtalk.
 If dec-init.cfg exists beside this script, it is prepended to the spoken text.
-Nodes with an -o or -t override are regenerated on every run. Nodes given
-with -o NODE= or -t are built even when they are not in astdb.txt (private
-nodes). After removing an override, rebuild that node with -n NODE -r.
+Overrides are saved in the overrides file and applied on every run; the file
+can also be edited by hand. Only nodes whose override was added, changed or
+removed since the last run are rebuilt. Nodes with a node-number override
+are built even when they are not in astdb.txt (private nodes); when such an
+override is removed, the node's announcement is deleted.
 
 Examples:
     ./write_node_callsigns.sh -a -f       # First full build, no prompt
@@ -99,6 +119,8 @@ Examples:
     ./write_node_callsigns.sh -n 40000 -r # Rebuild one node
     ./write_node_callsigns.sh -f -o "506311=N2DYI hub" -o "N2DYI=N2DYI repeater"
     ./write_node_callsigns.sh -f -t "1999=the lab node"
+    ./write_node_callsigns.sh -f -x 506311 # Remove an override
+    ./write_node_callsigns.sh -l          # List saved overrides
 EOF
 }
 
@@ -233,7 +255,7 @@ process_one_node() {
     local text
 
     if [[ $mode == t ]]; then
-        # Custom text comes from the command line, not astdb, so it is
+        # Custom text comes from the overrides file, not astdb, so it is
         # trusted and may carry DECtalk commands.
         SPEECH_TEXT=$callsign
     else
@@ -300,26 +322,45 @@ lookup_node_callsign() {
     ' "$SRCDIR/astdb.txt"
 }
 
-# Work out what to speak for a node, into SPEAK_MODE and SPEAK_VALUE
-# (see process_one_node). Returns 0 if an -o/-t override applies.
-resolve_node() {
-    local node=$1
-    local callsign=$2
+# resolve_with NODE_ARR CALL_ARR TEXT_ARR NODE CALLSIGN
+# Work out what to speak for a node under the given set of overrides, into
+# SPEAK_MODE and SPEAK_VALUE (see process_one_node). Returns 0 if an
+# override applies.
+resolve_with() {
+    local -n _rw_node=$1 _rw_call=$2 _rw_text=$3
+    local node=$4
+    local callsign=$5
     local call_key=${callsign^^}
 
     SPEAK_MODE=c
     SPEAK_VALUE=$callsign
-    if [[ -n ${CUSTOM_TEXT[$node]+x} ]]; then
+    if [[ -n ${_rw_text[$node]+x} ]]; then
         SPEAK_MODE=t
-        SPEAK_VALUE=${CUSTOM_TEXT[$node]}
-    elif [[ -n ${NODE_OVERRIDE[$node]+x} ]]; then
-        SPEAK_VALUE=${NODE_OVERRIDE[$node]}
-    elif [[ -n $call_key && -n ${CALL_OVERRIDE[$call_key]+x} ]]; then
-        SPEAK_VALUE=${CALL_OVERRIDE[$call_key]}
+        SPEAK_VALUE=${_rw_text[$node]}
+    elif [[ -n ${_rw_node[$node]+x} ]]; then
+        SPEAK_VALUE=${_rw_node[$node]}
+    elif [[ -n $call_key && -n ${_rw_call[$call_key]+x} ]]; then
+        SPEAK_VALUE=${_rw_call[$call_key]}
     else
         return 1
     fi
     return 0
+}
+
+# Resolve a node under the current overrides.
+resolve_node() {
+    resolve_with NODE_OVERRIDE CALL_OVERRIDE CUSTOM_TEXT "$1" "$2"
+}
+
+# Return 0 if the overrides make the node sound different from the last
+# run: an override for it was added, changed or removed.
+override_changed() {
+    local mode value
+    (( OVERRIDES_SAME )) && return 1
+    resolve_with PREV_NODE_OVERRIDE PREV_CALL_OVERRIDE PREV_CUSTOM_TEXT "$1" "$2"
+    mode=$SPEAK_MODE value=$SPEAK_VALUE
+    resolve_node "$1" "$2"
+    [[ $mode != "$SPEAK_MODE" || $value != "$SPEAK_VALUE" ]]
 }
 
 # Return 0 if the node needs (re)generating.
@@ -331,8 +372,7 @@ needs_rebuild() {
 
     (( FORCE_REBUILD )) && return 0
     [[ -f "$out" ]] || return 0
-    # Overrides aren't tracked in the previous db, so always rebuild them.
-    resolve_node "$node" "$callsign" && return 0
+    override_changed "$node" "$callsign" && return 0
 
     # Existing file: rebuild only when we know the callsign changed.
     if [[ -n "$old" && "$old" != "$callsign" ]]; then
@@ -349,6 +389,9 @@ queue_node() {
 
     if resolve_node "$node" "$callsign"; then
         if [[ $SPEAK_MODE == t ]]; then note=" (custom text)"; else note=" (override)"; fi
+    elif override_changed "$node" "$callsign"; then
+        note=" (override removed)"
+        resolve_node "$node" "$callsign" || true
     fi
     printf '%s|%s|%s\n' "$node" "$SPEAK_MODE" "$SPEAK_VALUE" >> "$WORK_FILE"
     if [[ -z "$old" ]]; then
@@ -368,13 +411,131 @@ parse_override() {
     [[ -n ${OPT_TEXT//[[:space:]]/} ]] || die "-$flag: missing text in: $arg"
     # "|" separates fields in the work file; a newline would end a record.
     [[ $OPT_TEXT != *[\|$'\n']* ]] || die "-$flag: text may not contain '|' or a newline: $arg"
+    [[ $OPT_KEY =~ ^[^[:space:]=\|]+$ ]] || die "-$flag: key may not contain spaces: $arg"
+}
+
+# Parse one overrides-file line into P_KIND, P_KEY and P_TEXT:
+#   override KEY = TEXT
+#   text NODE = TEXT
+parse_override_line() {
+    [[ $1 =~ ^[[:space:]]*(override|text)[[:space:]]+([^[:space:]=]+)[[:space:]]*=[[:space:]]*(.*)$ ]] || return 1
+    P_KIND=${BASH_REMATCH[1]}
+    P_KEY=${BASH_REMATCH[2]}
+    P_TEXT=${BASH_REMATCH[3]}
+    P_TEXT=${P_TEXT%"${P_TEXT##*[![:space:]]}"}
+    [[ -n $P_TEXT && $P_TEXT != *\|* ]] || return 1
+    [[ $P_KIND == override || $P_KEY =~ ^[0-9]+$ ]]
+}
+
+# load_overrides FILE NODE_ARR CALL_ARR TEXT_ARR WARN
+# Read an overrides file into the three arrays. With WARN=1, report lines
+# that can't be used.
+load_overrides() {
+    local file=$1 warn=$5 line lineno=0
+    local -n _lo_node=$2 _lo_call=$3 _lo_text=$4
+    _lo_node=() _lo_call=() _lo_text=()
+    [[ -f $file ]] || return 0
+    while IFS= read -r line || [[ -n $line ]]; do
+        lineno=$((lineno + 1))
+        line=${line%$'\r'}
+        [[ $line =~ ^[[:space:]]*(#.*)?$ ]] && continue
+        if ! parse_override_line "$line"; then
+            (( warn )) && printf 'Warning: %s line %d is not a valid override, skipped: %s\n' \
+                "$file" "$lineno" "$line" >&2
+            continue
+        fi
+        if [[ $P_KIND == text ]]; then
+            _lo_text["$P_KEY"]=$P_TEXT
+        elif [[ $P_KEY =~ ^[0-9]+$ ]]; then
+            _lo_node["$P_KEY"]=$P_TEXT
+        else
+            _lo_call["${P_KEY^^}"]=$P_TEXT
+        fi
+    done < "$file"
+}
+
+# Print the current overrides, one "kind KEY = TEXT" line each, sorted.
+print_overrides() {
+    local key
+    {
+        for key in "${!NODE_OVERRIDE[@]}"; do printf 'override %s = %s\n' "$key" "${NODE_OVERRIDE[$key]}"; done
+        for key in "${!CALL_OVERRIDE[@]}"; do printf 'override %s = %s\n' "$key" "${CALL_OVERRIDE[$key]}"; done
+        for key in "${!CUSTOM_TEXT[@]}"; do printf 'text %s = %s\n' "$key" "${CUSTOM_TEXT[$key]}"; done
+    } | sort
+}
+
+# Run awk program $1 over the overrides file and replace the file's
+# contents with the result, keeping its owner and permissions.
+rewrite_overrides_file() {
+    local tmp
+    if [[ ! -f $OVERRIDES_FILE ]]; then
+        printf '%s\n' \
+            "# Node announcement overrides for write_node_callsigns_dectalk.sh." \
+            "# One entry per line (see README.md):" \
+            "#   override KEY = TEXT   KEY is a node number or a call sign" \
+            "#   text NODE = TEXT      TEXT is spoken exactly as written" \
+            > "$OVERRIDES_FILE" || die "Could not create $OVERRIDES_FILE"
+    fi
+    tmp=$(mktemp) || die "Could not create a temporary file"
+    awk "$1" "$OVERRIDES_FILE" > "$tmp" && cat "$tmp" > "$OVERRIDES_FILE" \
+        || { rm -f "$tmp"; die "Could not update $OVERRIDES_FILE"; }
+    rm -f "$tmp"
+}
+
+# The awk programs below find entry lines by kind and key (any case) and
+# take their values from the environment, so backslashes in TEXT survive.
+OVERRIDE_LINE_AWK='
+    function entry(line, p) {
+        sub(/^[ \t]+/, "", line)
+        if (!match(line, /^(override|text)[ \t]+[^ \t=]+/)) return 0
+        split(substr(line, 1, RLENGTH), p, /[ \t]+/)
+        kind = p[1]; key = toupper(p[2])
+        return 1
+    }'
+
+# Add an entry, or replace an existing entry of the same kind and key.
+save_override() {
+    KIND=$1 KEY=$2 TEXT=$3 rewrite_overrides_file "$OVERRIDE_LINE_AWK"'
+        entry($0) && kind == ENVIRON["KIND"] && key == toupper(ENVIRON["KEY"]) {
+            if (!done) print ENVIRON["KIND"] " " ENVIRON["KEY"] " = " ENVIRON["TEXT"]
+            done = 1
+            next
+        }
+        { print }
+        END { if (!done) print ENVIRON["KIND"] " " ENVIRON["KEY"] " = " ENVIRON["TEXT"] }'
+    log "Saved: $1 $2 = $3"
+}
+
+# Remove every entry (override or text) for a key.
+remove_override() {
+    local before after
+    if [[ -f $OVERRIDES_FILE ]]; then
+        before=$(wc -l < "$OVERRIDES_FILE")
+        KEY=$1 rewrite_overrides_file "$OVERRIDE_LINE_AWK"'
+            entry($0) && key == toupper(ENVIRON["KEY"]) { next }
+            { print }'
+        after=$(wc -l < "$OVERRIDES_FILE")
+    fi
+    if [[ -f $OVERRIDES_FILE ]] && (( before > after )); then
+        log "Removed the saved override(s) for $1"
+    else
+        log "Warning: no saved override for $1 in $OVERRIDES_FILE" >&2
+    fi
+}
+
+# Save the overrides this run applied, for the next run to compare against.
+save_override_snapshot() {
+    print_overrides > "$PREV_OVERRIDES" || die "Could not write $PREV_OVERRIDES"
+    vlog "Updated previous overrides: $PREV_OVERRIDES"
 }
 
 confirm_processing() {
     local node_count=$1
+    local remove_count=$2
     (( FORCE_RUN )) && return 0
 
     log "$node_count nodes need to be processed (jobs=$JOBS)."
+    (( remove_count )) && log "$remove_count announcements will be deleted."
     log "Preview of changes:"
     local i=0 line
     while IFS= read -r line; do
@@ -483,22 +644,25 @@ format_total_time() {
 }
 
 # --- options ---
-while getopts "haij:n:d:s:p:o:t:fvr" OPTION; do
+while getopts "haij:n:d:s:p:o:t:x:c:lfvr" OPTION; do
     case "$OPTION" in
         o)
             parse_override o "$OPTARG"
             # All digits is a node number; anything else is a callsign.
-            if [[ $OPT_KEY =~ ^[0-9]+$ ]]; then
-                NODE_OVERRIDE["$OPT_KEY"]=$OPT_TEXT
-            else
-                CALL_OVERRIDE["${OPT_KEY^^}"]=$OPT_TEXT
-            fi
+            [[ $OPT_KEY =~ ^[0-9]+$ ]] || OPT_KEY=${OPT_KEY^^}
+            EDIT_OPS+=(override) EDIT_KEYS+=("$OPT_KEY") EDIT_TEXTS+=("$OPT_TEXT")
             ;;
         t)
             parse_override t "$OPTARG"
             [[ $OPT_KEY =~ ^[0-9]+$ ]] || die "-t key must be a node number: $OPTARG"
-            CUSTOM_TEXT["$OPT_KEY"]=$OPT_TEXT
+            EDIT_OPS+=(text) EDIT_KEYS+=("$OPT_KEY") EDIT_TEXTS+=("$OPT_TEXT")
             ;;
+        x)
+            [[ $OPTARG =~ ^[^[:space:]=\|]+$ ]] || die "-x needs a node number or callsign, got: $OPTARG"
+            EDIT_OPS+=(remove) EDIT_KEYS+=("$OPTARG") EDIT_TEXTS+=("")
+            ;;
+        c) OVERRIDES_FILE="$OPTARG" ;;
+        l) LIST_ONLY=1 ;;
         h) usage; exit 0 ;;
         a) PROCESS_ALL=1 ;;
         i) INCNODE=1 ;;
@@ -518,8 +682,33 @@ done
 
 start_time="$(date +%s%3N)"
 
+for i in "${!EDIT_OPS[@]}"; do
+    if [[ ${EDIT_OPS[i]} == remove ]]; then
+        remove_override "${EDIT_KEYS[i]}"
+    else
+        save_override "${EDIT_OPS[i]}" "${EDIT_KEYS[i]}" "${EDIT_TEXTS[i]}"
+    fi
+done
+load_overrides "$OVERRIDES_FILE" NODE_OVERRIDE CALL_OVERRIDE CUSTOM_TEXT 1
+
+if (( LIST_ONLY )); then
+    if [[ -n $(print_overrides) ]]; then
+        log "Saved overrides in $OVERRIDES_FILE:"
+        print_overrides | sed 's/^/  /'
+    else
+        log "No saved overrides in $OVERRIDES_FILE."
+    fi
+    exit 0
+fi
+
 resolve_astdb_dir || die "astdb.txt not found (tried /var/lib/asterisk, /var/log/asterisk). Use -s PATH."
 [[ -z "$PREV_DB" ]] && PREV_DB="$SRCDIR/previous_astdb.txt"
+PREV_OVERRIDES="$(dirname "$PREV_DB")/previous_node_overrides.conf"
+load_overrides "$PREV_OVERRIDES" PREV_NODE_OVERRIDE PREV_CALL_OVERRIDE PREV_CUSTOM_TEXT 0
+# Fast path: nothing changed, so no node needs comparing.
+if [[ -f $PREV_OVERRIDES && $(print_overrides) == "$(< "$PREV_OVERRIDES")" ]]; then
+    OVERRIDES_SAME=1
+fi
 
 [[ -x "$SAY" ]] || die "DECtalk say command not found at $SAY"
 command -v perl >/dev/null 2>&1 || die "perl is required to trim silence"
@@ -568,8 +757,8 @@ else
             continue
         fi
 
-        # Incremental: only new or changed callsigns, plus overrides.
-        if [[ -n "$old" && "$old" == "$callsign" ]] && ! resolve_node "$node" "$callsign"; then
+        # Incremental: only new or changed callsigns and overrides.
+        if [[ -n "$old" && "$old" == "$callsign" ]] && ! override_changed "$node" "$callsign"; then
             continue
         fi
         if needs_rebuild "$node" "$callsign"; then
@@ -584,24 +773,45 @@ else
     for node in "${!CUSTOM_TEXT[@]}" "${!NODE_OVERRIDE[@]}"; do
         [[ -n ${IN_ASTDB[$node]+x} ]] && continue
         IN_ASTDB["$node"]=1
-        queue_node "$node" ""
-        (( ++node_count )) || true
+        if needs_rebuild "$node" ""; then
+            queue_node "$node" ""
+            (( ++node_count )) || true
+        fi
+    done
+
+    # A private node whose override was removed has nothing left to say:
+    # delete its announcement.
+    for node in "${!PREV_CUSTOM_TEXT[@]}" "${!PREV_NODE_OVERRIDE[@]}"; do
+        [[ -n ${IN_ASTDB[$node]+x} ]] && continue
+        IN_ASTDB["$node"]=1
+        [[ -f $DESTDIR/$node.ulaw ]] || continue
+        REMOVE_NODES+=("$node")
+        printf '%s: override removed, not in astdb -> announcement deleted\n' "$node" >> "$CHANGES_FILE"
     done
 fi
 
-if (( node_count == 0 )); then
+# The previous db and overrides record what a full run applied, so a
+# single-node run (-n) leaves them alone.
+if (( node_count == 0 && ${#REMOVE_NODES[@]} == 0 )); then
     log "No nodes need processing."
-    if [[ ! -f "$PREV_DB" ]]; then
-        update_previous_db
+    if [[ -z "$SINGLE_NODE" ]]; then
+        [[ -f "$PREV_DB" ]] || update_previous_db
+        save_override_snapshot
     fi
     end_time="$(date +%s%3N)"
     log "Total script execution time: $(format_total_time "$((end_time - start_time))")"
     exit 0
 fi
 
-confirm_processing "$node_count"
-run_parallel
-update_previous_db
+confirm_processing "$node_count" "${#REMOVE_NODES[@]}"
+for node in "${REMOVE_NODES[@]}"; do
+    rm -f "$DESTDIR/$node.ulaw" && log "Deleted the announcement for node $node"
+done
+(( node_count )) && run_parallel
+if [[ -z "$SINGLE_NODE" ]]; then
+    update_previous_db
+    save_override_snapshot
+fi
 
 end_time="$(date +%s%3N)"
 log "Total script execution time: $(format_total_time "$((end_time - start_time))")"
