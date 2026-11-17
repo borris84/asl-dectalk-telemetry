@@ -29,7 +29,7 @@
 
 set -uo pipefail
 
-VERSION=0.15
+VERSION=0.16
 REPO=borris84/asl-dectalk-telemetry
 RELEASE_URL="https://github.com/$REPO/archive/refs/tags/v$VERSION.tar.gz"
 DOWNLOAD_DIR=/usr/local/src/asl-dectalk-telemetry-$VERSION
@@ -317,7 +317,7 @@ step_dectalk() {
     fi
     echo "It will be downloaded from $DECTALK_REPO and built for this"
     echo "machine ($(uname -m)), then installed in $DECTALK_DIR with $SAY linked to it."
-    echo "This needs an internet connection and about 1 GB of free disk space."
+    echo "This needs an internet connection and about 500 MB of free disk space."
     echo
     ask_yn "Build and install DECtalk now?" y \
         || die "The scripts need DECtalk. Installation stopped."
@@ -870,10 +870,36 @@ step_generate() {
         echo "Call signs can be spelled with letters (\"N 2 D Y I\") or with the"
         echo "phonetic alphabet (\"November, 2, Delta, Yankee, India\")."
         ask_yn "Speak call signs phonetically?" n && args+=(-P)
-        "$BIN_DIR/$NODES_SCRIPT" "${args[@]}" || echo "$NODES_SCRIPT reported a problem (see above)."
+        if "$BIN_DIR/$NODES_SCRIPT" "${args[@]}"; then
+            nodes_reminder "${args[@]}"
+        else
+            echo "$NODES_SCRIPT reported a problem (see above)."
+        fi
     else
         echo "Skipped. Run \"$NODES_SCRIPT -a\" later to build them."
     fi
+}
+
+# nodes_reminder ARGS  - after the node names are built with ARGS, explain
+# how to keep them current, and that the installer can be run again.
+nodes_reminder() {
+    local arg cron="0 3 * * * $BIN_DIR/$NODES_SCRIPT -f"
+    # -a and -r were for this first full build; keep the voice options.
+    for arg in "$@"; do
+        [[ $arg == -a || $arg == -r ]] || cron+=" $arg"
+    done
+    echo
+    echo "The node names were built once. Nodes are added and changed all the"
+    echo "time, so run $NODES_SCRIPT regularly to keep them current,"
+    echo "for example every night at 3:00 from root's crontab (sudo crontab -e):"
+    echo
+    echo "  $cron"
+    echo
+    echo "See \"Keeping node names up to date\" in the README:"
+    echo "  https://github.com/$REPO#keeping-node-names-up-to-date"
+    echo
+    echo "To change the speaking rate or other settings later, run this installer"
+    echo "again. Steps that are already done are skipped."
 }
 
 # --- Upgrade ---------------------------------------------------------------
