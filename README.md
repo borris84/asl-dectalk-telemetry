@@ -206,6 +206,13 @@ as `<node>.ulaw`. The node database is read from
 it is kept as `previous_astdb.txt` in the same folder, so later runs only
 rebuild nodes whose call sign changed.
 
+Many call signs have several nodes. Nodes that say exactly the same thing
+share one announcement: it is made once, and the other nodes' files are
+hard links to it. Without `-i` this roughly halves the time of a full run
+and the disk space used. With `-i` every announcement is different, so
+nothing is shared. If you copy the folder somewhere, use `cp -a` or
+`rsync -aH` to keep the sharing; other copies work but take the full space.
+
 How the call sign field is spoken:
 
 - Anything shaped like an amateur radio call sign is spelled out:

@@ -25,6 +25,9 @@
 #   - Output is still .ulaw (raw headerless u-law), written to a temp file
 #     then renamed into place (crash-safe / no partial files).
 #   - Parallel jobs (GNU parallel / xargs -P)
+#   - Nodes that say exactly the same thing (same call sign and options,
+#     no node number) share one file: it is rendered once and the other
+#     nodes' files are hard links to it
 #   - Resume-safe: skip existing .ulaw unless callsign changed or -r
 #   - Durable previous-db beside astdb.txt (not /tmp)
 #   - Auto-locate astdb in /var/lib/asterisk or /var/log/asterisk
@@ -327,12 +330,17 @@ callsign_to_speech() {
     SPEECH_TEXT="${tokens[*]-}"
 }
 
-# Speak one node. Prints exactly one line on stdout per node - "OK ..." or
-# "FAIL <reason>" - which report_progress counts and displays.
+# Speak one announcement for one or more nodes that say the same thing.
+# Prints exactly one line on stdout per node - "OK ..." or "FAIL <reason>" -
+# which report_progress counts and displays.
+#   $1 nodes: comma-separated. The first node's file is rendered and the
+#      others are hard links to it, so the audio is stored once.
 #   $2 mode: c = $3 is a callsign field (astdb or -o), t = $3 is -t text
-#   $4 / $5: 1 or 0 for this node's -P and -i (its mode, or the defaults)
+#   $4 / $5: 1 or 0 for these nodes' -P and -i (their mode, or the defaults)
 process_one_node() {
-    local node=$1
+    local -a nodes
+    IFS=, read -r -a nodes <<< "$1"
+    local node=${nodes[0]}
     local mode=$2
     local callsign=$3
     local PHONETIC=${4:-$PHONETIC}
@@ -340,7 +348,7 @@ process_one_node() {
     local out="$DESTDIR/$node.ulaw"
     local tmp="$out.tmp.$$"
     local SPEECH_TEXT="" SPELLED=""
-    local text
+    local text n link
 
     if [[ $mode == t ]]; then
         # Custom text comes from the overrides file, not astdb, so it is
@@ -350,7 +358,9 @@ process_one_node() {
         callsign_to_speech "$callsign"
     fi
     if [[ -z "$SPEECH_TEXT" ]]; then
-        printf 'FAIL Error: Nothing speakable for node %s (%s)\n' "$node" "$callsign"
+        for n in "${nodes[@]}"; do
+            printf 'FAIL Error: Nothing speakable for node %s (%s)\n' "$n" "$callsign"
+        done
         return 1
     fi
     text="$SPEECH_TEXT"
@@ -373,11 +383,25 @@ process_one_node() {
         mv -f "$tmp" "$out"
     else
         rm -f "$tmp"
-        printf 'FAIL DECtalk failed for node %s (%s)\n' "$node" "$callsign"
+        for n in "${nodes[@]}"; do
+            printf 'FAIL DECtalk failed for node %s (%s)\n' "$n" "$callsign"
+        done
         return 1
     fi
-
     printf 'OK %s %s -> %s\n' "$node" "$callsign" "$text"
+
+    # Link under a temp name, then rename over the old file, so each node
+    # always has a complete announcement. Renaming only replaces that
+    # node's name: a later change to one node leaves the others alone.
+    for n in "${nodes[@]:1}"; do
+        link="$DESTDIR/$n.ulaw"
+        if ln -f -- "$out" "$link.tmp.$$" && mv -f -- "$link.tmp.$$" "$link"; then
+            printf 'OK %s %s -> %s (shared with %s)\n' "$n" "$callsign" "$text" "$node"
+        else
+            rm -f -- "$link.tmp.$$"
+            printf 'FAIL Could not link node %s to %s\n' "$n" "$out"
+        fi
+    done
 }
 
 export -f process_one_node callsign_to_speech is_callsign spell_out phonetic_items
@@ -737,21 +761,42 @@ report_progress() {
     fi
 }
 
+# Group the work file's nodes by what they will say, into GROUP_FILE lines
+# "node,node,...|mode|value|phonetic|number". Nodes whose number is spoken
+# are never grouped. Groups keep the order of their first node.
+group_work() {
+    awk -F'|' -v OFS='|' '
+        {
+            key = $2 FS $3 FS $4 FS $5
+            if ($5 == 1) key = key FS $1
+            if (key in nodes) { nodes[key] = nodes[key] "," $1; next }
+            order[++count] = key
+            nodes[key] = $1
+            rest[key] = $2 OFS $3 OFS $4 OFS $5
+        }
+        END { for (i = 1; i <= count; i++) print nodes[order[i]], rest[order[i]] }
+    ' "$WORK_FILE" > "$GROUP_FILE"
+}
+
 run_parallel() {
-    local total
+    local total groups
     total="$(wc -l < "$WORK_FILE" | tr -d ' ')"
+    group_work
+    groups="$(wc -l < "$GROUP_FILE" | tr -d ' ')"
+    (( groups < total )) \
+        && log "$total nodes say $groups different things: rendering $groups announcements, the rest are shared."
 
     if command -v parallel >/dev/null 2>&1; then
         # --will-cite: skip the one-time citation prompt/notice.
         # A node that fails is reported by process_one_node; it must not
         # abort the rest of the run.
-        parallel --will-cite -j "$JOBS" --colsep '[|]' process_one_node {1} {2} {3} {4} {5} < "$WORK_FILE" || true
+        parallel --will-cite -j "$JOBS" --colsep '[|]' process_one_node {1} {2} {3} {4} {5} < "$GROUP_FILE" || true
     else
-        # Batch many nodes into each spawned worker to amortize bash
-        # startup overhead.
+        # Batch many announcements into each spawned worker to amortize
+        # bash startup overhead.
         while IFS='|' read -r node mode callsign phon num; do
             printf '%s\0%s\0%s\0%s\0%s\0' "$node" "$mode" "$callsign" "$phon" "$num"
-        done < "$WORK_FILE" \
+        done < "$GROUP_FILE" \
             | xargs -0 -n 100 -P "$JOBS" bash -c '
                 while (( $# )); do
                     process_one_node "$1" "$2" "$3" "$4" "$5" || true
@@ -870,7 +915,8 @@ load_previous_database
 
 WORK_FILE="$(mktemp)"
 CHANGES_FILE="$(mktemp)"
-cleanup() { rm -f "$WORK_FILE" "$CHANGES_FILE"; }
+GROUP_FILE="$(mktemp)"
+cleanup() { rm -f "$WORK_FILE" "$CHANGES_FILE" "$GROUP_FILE"; }
 trap cleanup EXIT
 
 node_count=0
