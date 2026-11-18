@@ -2,7 +2,7 @@
 
 DECtalk voice telemetry and node name announcements for AllStarLink 3 (ASL3).
 
-Version 0.17
+Version 0.18
 
 This project replaces the stock ASL3 telemetry voice with DECtalk. It also
 builds a spoken announcement for every node in the AllStarLink node
@@ -15,8 +15,9 @@ It contains:
 | `install.sh` | Guided installer. Installs DECtalk and the scripts, and configures Asterisk. |
 | `dectalk-telemetry.sh` | Generates the telemetry prompts listed in `prompt-list.txt` with DECtalk. This is a minimal prompt list, only what is necessary for app_rpt, not the full set from Asterisk. |
 | `write_node_callsigns_dectalk.sh` | Generates a DECtalk announcement for each node in the ASL node database. |
+| `dectalk-speak.sh` | Speaks text you type, pipe in or put in a file on your node, or writes it to a `.ulaw` file. |
 | `prompt-list.txt` | The telemetry prompts: a sound file name and the text DECtalk speaks for it. |
-| `dec-init.cfg` | DECtalk voice settings (speaking rate, pitch and so on) used by both scripts. |
+| `dec-init.cfg` | DECtalk voice settings (speaking rate, pitch and so on) used by all the scripts. |
 | `node-overrides.conf` | Your saved node announcement overrides (empty to start with). |
 
 ## Requirements
@@ -62,7 +63,7 @@ curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main
 ```
 
 The installer downloads the release files to
-`/usr/local/src/asl-dectalk-telemetry-0.17` and runs from there.
+`/usr/local/src/asl-dectalk-telemetry-0.18` and runs from there.
 
 ### Install from a copy of the repository
 
@@ -464,6 +465,45 @@ for example every night at 3:00. Edit root's crontab with
 If you use `-i` or `-P`, add them to the same line. Overrides don't need to be
 given, because they are read from the overrides file.
 
+## Speaking your own text
+
+`dectalk-speak.sh` speaks any text on your node with the same voice as the
+telemetry. The text comes from a file, or is typed or piped in:
+
+```sh
+echo "The net starts in five minutes." | sudo dectalk-speak.sh
+sudo dectalk-speak.sh announcement.txt
+sudo dectalk-speak.sh        # type the text, then press Ctrl-D on a new line
+```
+
+With `-i`, the script keeps a prompt open: each line you type is spoken as
+soon as you press Enter, like a chat, and the up arrow brings back earlier
+lines. Press Ctrl-C to quit. It works with the other options, for example
+`sudo dectalk-speak.sh -i -g` to talk to every connected node.
+
+By default it is played on your node only (`rpt localplay`). With `-g` it
+is also sent to every node connected to yours (`rpt playback`). Either way
+it is transmitted if the node has a radio. DECtalk commands such as
+`[:ra 200]` can be put in the text.
+
+The first time, the script finds the nodes defined in
+`/etc/asterisk/rpt.conf` that Asterisk is running. If there is more than one,
+it asks which to use. The node is saved as the default in
+`/opt/asl-telem/speak-node.conf`, and used from then on.
+
+| Option | Description |
+| --- | --- |
+| `-n NODE` | Play on another node, this time only. |
+| `-s` | Save a new default: the `-n` node, or choose again from the running nodes. |
+| `-l` | Play on the node only (the default). |
+| `-g` | Play on the node and every node connected to it. |
+| `-i` | Interactive: each line you type is spoken when you press Enter, until Ctrl-C. |
+| `-o FILE` | Write the speech to `FILE` (8 kHz u-law, name it `.ulaw`) instead of playing it. Needs no node, and no root. |
+
+Playing needs root, because it uses the Asterisk console. The sound is kept
+in `/run/asl-telem` for an hour so Asterisk has time to play it, and is then
+deleted.
+
 ## Changing the voice
 
 `/opt/asl-telem/dec-init.cfg` holds DECtalk commands that are put in front
@@ -506,7 +546,8 @@ Remove what the installer added. This also deletes your
 `node-overrides.conf`, so copy it somewhere first if you want to keep it.
 
 ```sh
-sudo rm -f /usr/local/bin/dectalk-telemetry.sh /usr/local/bin/write_node_callsigns_dectalk.sh
+sudo rm -f /usr/local/bin/dectalk-telemetry.sh /usr/local/bin/write_node_callsigns_dectalk.sh /usr/local/bin/dectalk-speak.sh
+sudo rm -rf /run/asl-telem
 sudo rm -rf /opt/asl-telem
 sudo rm -f /var/lib/asterisk/previous_astdb.txt /var/lib/asterisk/previous_node_overrides.conf
 ```

@@ -29,7 +29,7 @@
 
 set -uo pipefail
 
-VERSION=0.17
+VERSION=0.18
 REPO=borris84/asl-dectalk-telemetry
 RELEASE_URL="https://github.com/$REPO/archive/refs/tags/v$VERSION.tar.gz"
 DOWNLOAD_DIR=/usr/local/src/asl-dectalk-telemetry-$VERSION
@@ -55,7 +55,8 @@ ASTDB_UNITS=(asl3-update-astdb.service asl3-update-astdb.timer)
 
 TELEM_SCRIPT=dectalk-telemetry.sh
 NODES_SCRIPT=write_node_callsigns_dectalk.sh
-SCRIPTS=("$TELEM_SCRIPT" "$NODES_SCRIPT")
+SPEAK_SCRIPT=dectalk-speak.sh
+SCRIPTS=("$TELEM_SCRIPT" "$NODES_SCRIPT" "$SPEAK_SCRIPT")
 DATA_FILES=(dec-init.cfg prompt-list.txt)
 # Installed only if missing: the user's own settings, never replaced.
 USER_FILES=(node-overrides.conf)
@@ -1032,3 +1033,4 @@ fi
 
 echo
 echo "Done. Run \"$TELEM_SCRIPT\" or \"$NODES_SCRIPT -h\" from anywhere."
+echo "To speak your own text on the node, run \"$SPEAK_SCRIPT -h\" for how."
