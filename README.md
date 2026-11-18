@@ -6,7 +6,7 @@ Version 0.17
 
 This project replaces the stock ASL3 telemetry voice with DECtalk. It also
 builds a spoken announcement for every node in the AllStarLink node
-database, so Asterisk says "N 2 D Y I" instead of reading out a node number.
+database, so Asterisk says "N2DYI" instead of reading out a node number.
 
 It contains:
 
@@ -27,6 +27,25 @@ It contains:
 - About 500 MB of free disk space if DECtalk has to be built
 
 **HamVoIP is not supported.** The installer detects HamVoIP and stops.
+It is not recommended to run these scripts on highly customized commercial products, like Clear Node. If it breaks, you keep the pieces.
+
+## Why this project exists:
+I have been a long-time user of Asterisk PBX, since around 2005 or so, long before finding the world of Allstarlink. I was never a fan of the stock Allison voice. Not the cadence, not the tone, etc.
+This followed me to Allstarlink.org.
+
+As a full-time user of text-to-speech technology with screen readers, I wanted something that would speak telemetry much faster, while also still being very clear to understand, just for my own personal use.
+
+On the first node I built, I compiled a vocabulary list consisting of all the core phrases needed by app_rpt, and some extras required by HamVoIP, then wrote a script that rendered all that using a formant text-to-speech synthesizer (MacIntalk Fred) at a very high speaking rate, combined with a script to speak call signs instead of node numbers, which simply concatenated files together.
+This is what I used for years, but it wasn't particularly portable or easy to manage, especially with HamVoIP's way of doing things.
+A few other hams wanted my configuration, but it wasn't as easy as saying "just unzip some files here". As much as I dislike Allison, I equally dislike the sound of GSM audio compression, and HamVoIP used that format for all sound files. Not only that, but it had many built-in scripts that were hard-coded to look specifically for GSM files.
+Doing package updates would knock out my custom sounds, and undo all the find/replacing I did on the script tree.
+
+Thanks to ASL3's use of a much more modern version of Asterisk, which supports a custom sounds directory, none of that is necessary anymore, and we can have a TTS generate standard app_rpt telemetry at any desired speaking rate, plus readout of call signs as single utterances rather than concatenating a bunch of tiny files together, which sounds less natural than trying to speed up the existing Allison voice, which I have tried doing several different ways, none of which were to my satisfaction.
+
+I'm using DECtalk in this project because it's small, light-weight, local, and runs on pretty much anything, but this script could be adapted to use other TTS options, like Elevenlabs.
+
+Yes, ASL does have it's own text-to-speech option, which uses Piper, but I'm not really a fan of most of the available Piper voices, plus it takes much, much longer to generate sounds using it, especially on low-end and modest hardware, for a result that is, in my opinion, not nearly as good as what can be achieved with a Klatt formant synth, so I opted not to use it here.
+Piper itself can produce good results, but finding well--trained voices is hard. Almost nothing available publicly is done well enough for me. I'm very picky about speech.
 
 ## Install
 
