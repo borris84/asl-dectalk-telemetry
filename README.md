@@ -35,7 +35,7 @@ This followed me to Allstarlink.org.
 
 As a full-time user of text-to-speech technology with screen readers, I wanted something that would speak telemetry much faster, while also still being very clear to understand, just for my own personal use.
 
-On the first node I built, I compiled a vocabulary list consisting of all the core phrases needed by app_rpt, and some extras required by HamVoIP, then wrote a script that rendered all that using a formant text-to-speech synthesizer (MacIntalk Fred) at a very high speaking rate, combined with a script to speak call signs instead of node numbers, which simply concatenated files together.
+On the first node I built, I compiled a vocabulary list consisting of all the core phrases needed by app_rpt, and some extras required by HamVoIP, then wrote a script that rendered all that using a formant text-to-speech synthesizer (Macintalk Fred) at a very high speaking rate, combined with a script to speak call signs instead of node numbers, which simply concatenated files together.
 This is what I used for years, but it wasn't particularly portable or easy to manage, especially with HamVoIP's way of doing things.
 A few other hams wanted my configuration, but it wasn't as easy as saying "just unzip some files here". As much as I dislike Allison, I equally dislike the sound of GSM audio compression, and HamVoIP used that format for all sound files. Not only that, but it had many built-in scripts that were hard-coded to look specifically for GSM files.
 Doing package updates would knock out my custom sounds, and undo all the find/replacing I did on the script tree.
