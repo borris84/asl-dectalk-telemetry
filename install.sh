@@ -26,10 +26,12 @@
 # install.sh --upgrade only replaces the scripts of an existing install
 # (from GitHub: ... | sudo bash -s -- --upgrade). It changes no Asterisk
 # config, installs no packages and generates no sounds.
+# dectalk-telemetry-upgrade.sh downloads the latest release and runs its
+# install.sh --upgrade.
 
 set -uo pipefail
 
-VERSION=0.18
+VERSION=0.19
 REPO=borris84/asl-dectalk-telemetry
 RELEASE_URL="https://github.com/$REPO/archive/refs/tags/v$VERSION.tar.gz"
 DOWNLOAD_DIR=/usr/local/src/asl-dectalk-telemetry-$VERSION
@@ -56,7 +58,8 @@ ASTDB_UNITS=(asl3-update-astdb.service asl3-update-astdb.timer)
 TELEM_SCRIPT=dectalk-telemetry.sh
 NODES_SCRIPT=write_node_callsigns_dectalk.sh
 SPEAK_SCRIPT=dectalk-speak.sh
-SCRIPTS=("$TELEM_SCRIPT" "$NODES_SCRIPT" "$SPEAK_SCRIPT")
+UPGRADE_SCRIPT=dectalk-telemetry-upgrade.sh
+SCRIPTS=("$TELEM_SCRIPT" "$NODES_SCRIPT" "$SPEAK_SCRIPT" "$UPGRADE_SCRIPT")
 DATA_FILES=(dec-init.cfg prompt-list.txt)
 # Installed only if missing: the user's own settings, never replaced.
 USER_FILES=(node-overrides.conf)
@@ -934,6 +937,7 @@ upgrade() {
     fi
     echo
     echo "Upgrade to $VERSION done. Existing sounds were not changed."
+    echo "Next time, upgrade with: sudo $UPGRADE_SCRIPT"
     echo "To use changes in this version, regenerate them as described in the"
     echo "README (for example: $NODES_SCRIPT -a -r)."
 }
@@ -1034,3 +1038,4 @@ fi
 echo
 echo "Done. Run \"$TELEM_SCRIPT\" or \"$NODES_SCRIPT -h\" from anywhere."
 echo "To speak your own text on the node, run \"$SPEAK_SCRIPT -h\" for how."
+echo "To upgrade to a newer release later, run \"sudo $UPGRADE_SCRIPT\"."

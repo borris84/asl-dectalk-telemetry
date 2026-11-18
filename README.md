@@ -2,7 +2,7 @@
 
 DECtalk voice telemetry and node name announcements for AllStarLink 3 (ASL3).
 
-Version 0.18
+Version 0.19
 
 This project replaces the stock ASL3 telemetry voice with DECtalk. It also
 builds a spoken announcement for every node in the AllStarLink node
@@ -16,6 +16,7 @@ It contains:
 | `dectalk-telemetry.sh` | Generates the telemetry prompts listed in `prompt-list.txt` with DECtalk. This is a minimal prompt list, only what is necessary for app_rpt, not the full set from Asterisk. |
 | `write_node_callsigns_dectalk.sh` | Generates a DECtalk announcement for each node in the ASL node database. |
 | `dectalk-speak.sh` | Speaks text you type, pipe in or put in a file on your node, or writes it to a `.ulaw` file. |
+| `dectalk-telemetry-upgrade.sh` | Upgrades an existing install to the latest release from GitHub. |
 | `prompt-list.txt` | The telemetry prompts: a sound file name and the text DECtalk speaks for it. |
 | `dec-init.cfg` | DECtalk voice settings (speaking rate, pitch and so on) used by all the scripts. |
 | `node-overrides.conf` | Your saved node announcement overrides (empty to start with). |
@@ -63,7 +64,7 @@ curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main
 ```
 
 The installer downloads the release files to
-`/usr/local/src/asl-dectalk-telemetry-0.18` and runs from there.
+`/usr/local/src/asl-dectalk-telemetry-0.19` and runs from there.
 
 ### Install from a copy of the repository
 
@@ -75,20 +76,31 @@ sudo ./install.sh
 
 ## Upgrading
 
-To upgrade an existing install to the latest version without changing
+To upgrade an existing install to the latest release without changing
 anything else, run:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main/install.sh | sudo bash -s -- --upgrade
+sudo dectalk-telemetry-upgrade.sh
 ```
 
-If you are already logged in as root, you can leave out `sudo`:
+It downloads the latest release from GitHub, so it works however you
+installed, and needs no copy of the repository. Leave out `sudo` if you are
+logged in as root. It does nothing if you already have the latest version
+(`-f` reinstalls it anyway), and `-c` only checks: it shows the installed
+and latest versions and exits with status 10 if a newer release is
+available, so it can be used from a script.
+
+Versions older than 0.19 don't have this script yet. Upgrade those once
+straight from GitHub:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main/install.sh | bash -s -- --upgrade
+curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main/dectalk-telemetry-upgrade.sh | sudo bash
 ```
 
-Or, from a copy of the repository, `sudo ./install.sh --upgrade`.
+(or `| bash` as root). The upgrade installs the script, so from then on
+`sudo dectalk-telemetry-upgrade.sh` is enough. From a copy of the
+repository, `sudo ./install.sh --upgrade` still upgrades to the version in
+that copy.
 
 An upgrade:
 
@@ -546,7 +558,7 @@ Remove what the installer added. This also deletes your
 `node-overrides.conf`, so copy it somewhere first if you want to keep it.
 
 ```sh
-sudo rm -f /usr/local/bin/dectalk-telemetry.sh /usr/local/bin/write_node_callsigns_dectalk.sh /usr/local/bin/dectalk-speak.sh
+sudo rm -f /usr/local/bin/dectalk-telemetry.sh /usr/local/bin/write_node_callsigns_dectalk.sh /usr/local/bin/dectalk-speak.sh /usr/local/bin/dectalk-telemetry-upgrade.sh
 sudo rm -rf /run/asl-telem
 sudo rm -rf /opt/asl-telem
 sudo rm -f /var/lib/asterisk/previous_astdb.txt /var/lib/asterisk/previous_node_overrides.conf
