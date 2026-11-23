@@ -94,6 +94,7 @@ FORCE_REBUILD=0
 PROCESS_ALL=0
 SINGLE_NODE=""
 LIST_ONLY=0
+PRINT_TEXT=0
 
 declare -A PREV_CALLSIGNS
 # Overrides from the overrides file, and the ones applied by the last run.
@@ -154,6 +155,9 @@ OPTIONS:
    -x KEY      Remove the saved override(s) and mode for KEY (a node
                number or a callsign). Repeatable.
    -l          List the saved overrides and exit (after any -o/-t/-m/-x).
+   -T          Print "node<TAB>text" for every node in astdb.txt and exit:
+               the text each call sign field is spoken as (with -P if
+               given), without overrides or -i. Nothing is made.
    -c PATH     Overrides file (default: $OVERRIDES_FILE)
 EOF
     if [[ $ENGINE == elevenlabs ]]; then
@@ -404,6 +408,13 @@ callsign_to_speech() {
 #      others are hard links to it, so the audio is stored once.
 #   $2 mode: c = $3 is a callsign field (astdb or -o), t = $3 is -t text
 #   $4 / $5: 1 or 0 for these nodes' -P and -i (their mode, or the defaults)
+# node_number_text NODE  - set SPEECH_TEXT to what is said for a node whose
+# call sign field has nothing to say: "Node 2 9 4 4 5".
+node_number_text() {
+    spell_out "$1"
+    SPEECH_TEXT="Node $SPELLED"
+}
+
 process_one_node() {
     local -a nodes
     IFS=, read -r -a nodes <<< "$1"
@@ -445,8 +456,7 @@ process_one_node() {
             done
             return "$rc"
         fi
-        spell_out "$node"
-        SPEECH_TEXT="Node $SPELLED"
+        node_number_text "$node"
         INCNODE=0  # the number is already said
     fi
     if [[ -z "$SPEECH_TEXT" ]]; then
@@ -626,7 +636,7 @@ join_writer() {
     ' -- "$DESTDIR" "$SOUNDS_DIR" "$GAP_SHORT_BYTES" "$GAP_LONG_BYTES"
 }
 
-export -f process_one_node callsign_to_speech is_callsign spell_out phonetic_items \
+export -f process_one_node callsign_to_speech is_callsign spell_out phonetic_items node_number_text \
     render_announcement
 
 load_previous_database() {
@@ -1091,7 +1101,7 @@ format_total_time() {
 }
 
 # --- options ---
-while getopts "haiPj:n:d:s:p:o:t:m:x:c:lfvrSJ" OPTION; do
+while getopts "haiPj:n:d:s:p:o:t:m:x:c:lfvrSJT" OPTION; do
     case "$OPTION" in
         o)
             parse_override o "$OPTARG"
@@ -1117,6 +1127,7 @@ while getopts "haiPj:n:d:s:p:o:t:m:x:c:lfvrSJ" OPTION; do
             ;;
         c) OVERRIDES_FILE="$OPTARG" ;;
         l) LIST_ONLY=1 ;;
+        T) PRINT_TEXT=1 ;;
         h) usage; exit 0 ;;
         a) PROCESS_ALL=1 ;;
         i) INCNODE=1 ;;
@@ -1140,6 +1151,19 @@ done
 [[ -z "$JOBS" || "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "-j must be a positive integer"
 
 start_time="$(date +%s%3N)"
+
+# -T: what each node's call sign field is spoken as. Used to build and
+# match the prebuilt ElevenLabs voice packs.
+if (( PRINT_TEXT )); then
+    resolve_astdb_dir || die "astdb.txt not found (tried /var/lib/asterisk, /var/log/asterisk). Use -s PATH."
+    while IFS='|' read -r node callsign; do
+        [[ -n $node && -n $callsign ]] || continue
+        callsign_to_speech "$callsign"
+        [[ $SPEECH_TEXT == *[[:alnum:]]* ]] || node_number_text "$node"
+        printf '%s\t%s\n' "$node" "$SPEECH_TEXT"
+    done < <(latest_astdb_entries | sort -t'|' -k1,1n)
+    exit 0
+fi
 
 for i in "${!EDIT_OPS[@]}"; do
     if [[ ${EDIT_OPS[i]} == remove ]]; then
