@@ -296,7 +296,7 @@ is_callsign() {
 # into SPEECH_TEXT (no command substitution, so no subshell per node).
 #   - runs of letters/digits that are call signs are spelled out (for
 #     ElevenLabs they are sent as one upper case word, N2DYI, which it
-#     spells more reliably)
+#     spells more reliably, with any 0 set apart by spaces: KB 0 RIS)
 #   - a lone "/" or "-" joined to a call sign (KA4EPS/R, VA2RXP-25) is
 #     spoken as "slash" / "dash"
 #   - DECtalk only: a call sign's final I is sent as [']I (stressed) so it
@@ -369,8 +369,11 @@ callsign_to_speech() {
                 if [[ $ENGINE == elevenlabs ]]; then
                     # ElevenLabs says a call sign best as one upper case
                     # word: spaced-out single letters are read unreliably
-                    # ("y" as "yeah", "b" as "buh").
-                    text+=" ${tokens[i]^^} "
+                    # ("y" as "yeah", "b" as "buh"). A 0 inside the word is
+                    # read as the letter O, so it is set apart: KB0RIS is
+                    # sent as "KB 0 RIS".
+                    tok=${tokens[i]^^}
+                    text+=" ${tok//0/ 0 } "
                     continue
                 fi
                 spell_out "${tokens[i]}"
@@ -401,13 +404,6 @@ callsign_to_speech() {
     SPEECH_TEXT="${tokens[*]-}"
 }
 
-# Speak one announcement for one or more nodes that say the same thing.
-# Prints exactly one line on stdout per node - "OK ..." or "FAIL <reason>" -
-# which report_progress counts and displays.
-#   $1 nodes: comma-separated. The first node's file is rendered and the
-#      others are hard links to it, so the audio is stored once.
-#   $2 mode: c = $3 is a callsign field (astdb or -o), t = $3 is -t text
-#   $4 / $5: 1 or 0 for these nodes' -P and -i (their mode, or the defaults)
 # node_number_text NODE  - set SPEECH_TEXT to what is said for a node whose
 # call sign field has nothing to say: "Node 2 9 4 4 5".
 node_number_text() {
@@ -415,6 +411,13 @@ node_number_text() {
     SPEECH_TEXT="Node $SPELLED"
 }
 
+# Speak one announcement for one or more nodes that say the same thing.
+# Prints exactly one line on stdout per node - "OK ..." or "FAIL <reason>" -
+# which report_progress counts and displays.
+#   $1 nodes: comma-separated. The first node's file is rendered and the
+#      others are hard links to it, so the audio is stored once.
+#   $2 mode: c = $3 is a callsign field (astdb or -o), t = $3 is -t text
+#   $4 / $5: 1 or 0 for these nodes' -P and -i (their mode, or the defaults)
 process_one_node() {
     local -a nodes
     IFS=, read -r -a nodes <<< "$1"

@@ -67,6 +67,8 @@ Usage: pack-tool.sh COMMAND ...
                                if the pack has none, else as a delta
   compact NAME                 Merge the delta archives into one once there
                                are more than $MAX_DELTAS
+  link DIR TEXTS NODENAMES     Hard-link NODENAMES/<node>.ulaw to the
+                               pack's file for each node in TEXTS
   status DIR                   Show what the pack holds
 EOF
 }
@@ -340,6 +342,43 @@ cmd_compact() {
     echo "Merged ${#deltas[@]} delta archives of pack $name into $archive."
 }
 
+# link DIR TEXTS NODENAMES  - point NODENAMES/<node>.ulaw at the pack's
+# file for each node in TEXTS, as a hard link (a copy if DIR is on another
+# filesystem). Each link is made under a temp name and renamed, so a node
+# always has a complete announcement. Nodes whose text the pack doesn't
+# have are left as they are.
+cmd_link() {
+    local dir=$1 texts=$2 to=$3
+    check_dir "$dir"
+    [[ -d $to ]] || die "$to not found"
+    perl -MDigest::MD5=md5_hex -e '
+        my ($dir, $texts, $to) = @ARGV;
+        open(my $t, "<", $texts) or die "$texts: $!\n";
+        my ($linked, $same, $absent, $failed) = (0, 0, 0, 0);
+        while (<$t>) {
+            chomp;
+            my ($node, $text) = split /\t/, $_, 2;
+            next unless defined $text && $node =~ /^[0-9]+$/;
+            my $src = "$dir/files/" . md5_hex($text) . ".ulaw";
+            my @s = stat $src;
+            if (!@s) { $absent++; next }
+            my $dst = "$to/$node.ulaw";
+            my @d = stat $dst;
+            if (@d && $d[0] == $s[0] && $d[1] == $s[1]) { $same++; next }
+            my $tmp = "$dst.tmp.$$";
+            if ((link($src, $tmp) || system("cp", "--", $src, $tmp) == 0) && rename($tmp, $dst)) {
+                $linked++;
+            } else {
+                unlink $tmp;
+                warn "Could not link node $node\n";
+                $failed++;
+            }
+        }
+        print "Linked $linked nodes, $same already linked, $absent not in the pack, $failed failed.\n";
+        exit($failed ? 1 : 0);
+    ' "$dir" "$texts" "$to"
+}
+
 cmd_status() {
     check_dir "$1"
     echo "Pack $(conf_value "$1/pack.conf" PACK): $(conf_value "$1/pack.conf" VOICE_NAME)"
@@ -357,6 +396,7 @@ case $cmd in
     render) cmd_render "$@" ;;
     publish) (( $# == 1 )) || { usage >&2; exit 1; }; cmd_publish "$@" ;;
     compact) (( $# == 1 )) || { usage >&2; exit 1; }; cmd_compact "$@" ;;
+    link) (( $# == 3 )) || { usage >&2; exit 1; }; cmd_link "$@" ;;
     status) (( $# == 1 )) || { usage >&2; exit 1; }; cmd_status "$@" ;;
     -h|--help|help) usage ;;
     *) usage >&2; exit 1 ;;
