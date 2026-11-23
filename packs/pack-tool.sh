@@ -275,7 +275,22 @@ cmd_publish() {
     tag=pack-$name
 
     list=$(mktemp) || die "could not create a temporary file"
-    trap "rm -f -- '$list'" EXIT
+    trap "rm -f -- '$list' '$list.remote'" EXIT
+    # The published index may have gained entries since this copy was
+    # fetched (the daily workflow): merge them in, so uploading this index
+    # doesn't drop them. Entries made here that were also published there
+    # since take the published archive.
+    if gh release download "$tag" --repo "$REPO" --pattern index.tsv --output "$list.remote" 2> /dev/null; then
+        awk -F'\t' -v OFS='\t' '
+            FNR == NR { remote[$1] = $0; order[++n] = $1; next }
+            { if ($1 in remote) { if ($3 == "-") next; delete remote[$1] } local[++m] = $0 }
+            END {
+                for (i = 1; i <= n; i++) if (order[i] in remote) print remote[order[i]]
+                for (i = 1; i <= m; i++) print local[i]
+            }
+        ' "$list.remote" "$dir/index.tsv" > "$dir/index.tsv.new" \
+            && mv -f "$dir/index.tsv.new" "$dir/index.tsv" || die "could not merge the published index"
+    fi
     awk -F'\t' '$3 == "-" { print $1 ".ulaw" }' "$dir/index.tsv" > "$list"
     count=$(wc -l < "$list")
     if (( count == 0 )); then
