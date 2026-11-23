@@ -1,0 +1,85 @@
+# Keep the prebuilt ElevenLabs node name packs up to date.
+#
+# Every day, before nodes update their own node names at 3:00 (US
+# Eastern), download the AllStarLink node list and, for every pack that
+# has been published (a pack-NAME release), make the announcements for
+# call signs it doesn't have yet and publish them as a delta archive. See
+# packs/pack-tool.sh.
+#
+# Needs the repository secret ELEVENLABS_API_KEY.
+
+name: Voice pack updates
+
+on:
+  schedule:
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+    inputs:
+      max:
+        description: "Most announcements to make per pack (0 = no limit)"
+        default: "3000"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: voice-packs
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PACK_REPO: ${{ github.repository }}
+      ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+      MAX: ${{ inputs.max || '3000' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the API key
+        run: |
+          if [ -z "$ELEVENLABS_API_KEY" ]; then
+            echo "::error::The ELEVENLABS_API_KEY secret is not set."
+            exit 1
+          fi
+
+      - name: Download the node list
+        run: |
+          mkdir -p work/db
+          curl -fsS --retry 5 --retry-delay 30 -A "asl-dectalk-telemetry-packs" \
+            -o work/db/astdb.txt http://allmondb.allstarlink.org/
+          nodes=$(awk -F'|' 'NF >= 2 && $1 ~ /^[0-9]+$/' work/db/astdb.txt | wc -l)
+          echo "The node list has $nodes nodes."
+          # A short or broken download must not be taken as the node list.
+          if [ "$nodes" -lt 20000 ]; then
+            echo "::error::The node list has only $nodes nodes."
+            exit 1
+          fi
+          packs/pack-tool.sh texts work/db > work/texts.tsv
+          echo "$(cut -f2 work/texts.tsv | sort -u | wc -l) different announcements."
+
+      - name: Update the packs
+        run: |
+          status=0
+          for conf in packs/*.conf; do
+            name=$(basename "$conf" .conf)
+            if ! gh release view "pack-$name" > /dev/null 2>&1; then
+              echo "Pack $name is not published yet: skipped."
+              continue
+            fi
+            echo "::group::Pack $name"
+            dir=work/$name
+            if packs/pack-tool.sh fetch "$name" "$dir" \
+              && { packs/pack-tool.sh render -y -j 2 -m "$MAX" "$dir" work/texts.tsv || status=1; true; } \
+              && packs/pack-tool.sh publish "$dir" \
+              && packs/pack-tool.sh compact "$name"; then
+              :
+            else
+              echo "::error::Pack $name failed."
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $status
