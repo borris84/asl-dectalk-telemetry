@@ -291,7 +291,7 @@ cmd_publish() {
         | xz -6 -T0 > "$dir/$archive" || die "could not make $archive"
 
     if ! gh release view "$tag" --repo "$REPO" > /dev/null 2>&1; then
-        gh release create "$tag" --repo "$REPO" --latest=false \
+        gh release create "$tag" --repo "$REPO" --prerelease --latest=false \
             --title "Node name voice pack: $(conf_value "$dir/pack.conf" VOICE_NAME)" \
             --notes "Prebuilt ElevenLabs node name announcements for asl-dectalk-telemetry. Updated automatically as nodes are added. See packs/pack-tool.sh." \
             || die "could not create release $tag"
