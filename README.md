@@ -2,24 +2,37 @@
 
 DECtalk voice telemetry and node name announcements for AllStarLink 3 (ASL3).
 
-Version 0.19
+Version 0.20
 
 This project replaces the stock ASL3 telemetry voice with DECtalk. It also
 builds a spoken announcement for every node in the AllStarLink node
 database, so Asterisk says "N2DYI" instead of reading out a node number.
 
+Instead of DECtalk, the voices of the ElevenLabs online service can be used
+(see [ElevenLabs](#elevenlabs)). The installer asks which one you want.
+
 It contains:
 
 | File | Purpose |
 | --- | --- |
-| `install.sh` | Guided installer. Installs DECtalk and the scripts, and configures Asterisk. |
+| `install.sh` | Guided installer. Installs DECtalk and the scripts, and configures Asterisk. It is kept on the node as `asl-telem-setup.sh`, to change settings later. |
 | `dectalk-telemetry.sh` | Generates the telemetry prompts listed in `prompt-list.txt` with DECtalk. This is a minimal prompt list, only what is necessary for app_rpt, not the full set from Asterisk. |
 | `write_node_callsigns_dectalk.sh` | Generates a DECtalk announcement for each node in the ASL node database. |
 | `dectalk-speak.sh` | Speaks text you type, pipe in or put in a file on your node, or writes it to a `.ulaw` file. |
+| `elevenlabs-telemetry.sh` | Generates the telemetry prompts listed in `elevenlabs-prompt-list.txt` with ElevenLabs. |
+| `write_node_callsigns_elevenlabs.sh` | Generates the node announcements with ElevenLabs (it runs `write_node_callsigns_dectalk.sh`, which does the work for both). |
+| `elevenlabs-speak.sh` | Like `dectalk-speak.sh`, with an ElevenLabs voice. |
+| `elevenlabs-common.sh` | Code shared by the ElevenLabs scripts. |
 | `dectalk-telemetry-upgrade.sh` | Upgrades an existing install to the latest release from GitHub. |
 | `prompt-list.txt` | The telemetry prompts: a sound file name and the text DECtalk speaks for it. |
+| `elevenlabs-prompt-list.txt` | The same prompts in plain English, without DECtalk's phonemes, for ElevenLabs. |
 | `dec-init.cfg` | DECtalk voice settings (speaking rate, pitch and so on) used by all the scripts. |
 | `node-overrides.conf` | Your saved node announcement overrides (empty to start with). |
+
+The installer also writes `/opt/asl-telem/engine.conf`, which records the
+speech engine you chose (`ENGINE=dectalk` or `ENGINE=elevenlabs`), and for
+ElevenLabs `/opt/asl-telem/elevenlabs.conf`, which holds your API key and
+voice settings.
 
 ## Requirements
 
@@ -27,6 +40,8 @@ It contains:
 - Root access
 - An internet connection during install
 - About 500 MB of free disk space if DECtalk has to be built
+- For ElevenLabs instead of DECtalk: an ElevenLabs account whose plan
+  includes API access, and an internet connection whenever sounds are made
 
 **HamVoIP is not supported.** The installer detects HamVoIP and stops.
 It is not recommended to run these scripts on highly customized commercial products, like Clear Node. If it breaks, you keep the pieces.
@@ -64,7 +79,7 @@ curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main
 ```
 
 The installer downloads the release files to
-`/usr/local/src/asl-dectalk-telemetry-0.19` and runs from there.
+`/usr/local/src/asl-dectalk-telemetry-0.20` and runs from there.
 
 ### Install from a copy of the repository
 
@@ -105,9 +120,9 @@ that copy.
 An upgrade:
 
 - replaces the scripts in `/opt/asl-telem`
-- asks whether to keep your copy of `dec-init.cfg` or `prompt-list.txt` if
-  you have edited them
-- keeps your `node-overrides.conf`
+- asks whether to keep your copy of `dec-init.cfg`, `prompt-list.txt` or
+  `elevenlabs-prompt-list.txt` if you have edited them
+- keeps your `node-overrides.conf`, `elevenlabs.conf` and `engine.conf`
 - doesn't install packages, change the Asterisk config, or generate any
   sounds
 
@@ -122,6 +137,18 @@ version, regenerate them (see
 
 ## How the installer works
 
+The installer keeps a copy of itself in `/opt/asl-telem/install.sh`, linked
+as `/usr/local/bin/asl-telem-setup.sh`. To change the speech engine, the
+voice, the speaking rate or the other settings later, run:
+
+```sh
+sudo asl-telem-setup.sh
+```
+
+It works like the first install, but finished steps are skipped and the
+files already in `/opt/asl-telem` are used as they are. Upgrades replace
+it along with the scripts.
+
 The installer asks before each change. It answers most questions with a
 default when you press Enter. Every config file it edits is backed up first
 as `<file>.bak-<date-time>`. You can run it again at any time; finished
@@ -129,7 +156,12 @@ steps are detected and skipped.
 
 1. **Checks the system.** It must be run as root, on ASL3, and not on
    HamVoIP.
-2. **Installs DECtalk** if `/usr/local/bin/say` is missing or doesn't work.
+2. **Asks which speech engine to use**: DECtalk, or ElevenLabs. The choice
+   is saved in `/opt/asl-telem/engine.conf`. On a later run the current
+   engine is the default, and you can switch. The steps below are for
+   DECtalk; see [Installing with ElevenLabs](#installing-with-elevenlabs)
+   for how they differ.
+3. **Installs DECtalk** if `/usr/local/bin/say` is missing or doesn't work.
    DECtalk is downloaded from <https://github.com/dectalk/dectalk> and
    built for the machine it runs on (for example arm64 on a Raspberry Pi 4
    or 5, or amd64 on a PC). It is installed in `/opt/dectalk`, and
@@ -137,31 +169,33 @@ steps are detected and skipped.
    takes a minute or two on a Raspberry Pi. It is done in `/usr/local/src/dectalk-build`
    because `/tmp` is too small on many Pis, and that folder is removed
    afterwards.
-3. **Installs ffmpeg and perl** if they are missing.
-4. **Turns on automatic node database updates** so that
+4. **Installs ffmpeg and perl** if they are missing.
+5. **Turns on automatic node database updates** so that
    `/var/lib/asterisk/astdb.txt` exists and stays current (see
    [The node database](#the-node-database-astdbtxt)).
-5. **Installs the scripts** in `/opt/asl-telem`, with links in
-   `/usr/local/bin` so you can run them from anywhere. If you have edited
-   `dec-init.cfg` or `prompt-list.txt` since a previous install, it asks
+6. **Installs the scripts** in `/opt/asl-telem`, with links in
+   `/usr/local/bin` so you can run them from anywhere. Both the DECtalk and
+   the ElevenLabs scripts are installed, whichever engine you chose. If you
+   have edited `dec-init.cfg`, `prompt-list.txt` or
+   `elevenlabs-prompt-list.txt` since a previous install, it asks
    whether to keep your copy or replace it. Your `node-overrides.conf` is
    never replaced.
-6. **Sets the speaking rate** in `dec-init.cfg` (see
+7. **Sets the speaking rate** in `dec-init.cfg` (see
    [Changing the voice](#changing-the-voice)). You can hear a preview first:
    it is played on a node on this system with `rpt localplay`, like any
    other announcement, so it is transmitted if the node has a radio. If
    there are several nodes in `/etc/asterisk/rpt.conf`, you choose one.
    After the preview you can play it again, try another rate, or keep it.
-7. **Enables custom sounds** by setting `sounds_search_custom_dir = yes` in
+8. **Enables custom sounds** by setting `sounds_search_custom_dir = yes` in
    `/etc/asterisk/asterisk.conf`.
-8. **Points node names at the new announcements** by setting
+9. **Points node names at the new announcements** by setting
    `nodenames = /usr/share/asterisk/sounds/custom/rpt/nodenames` in the
    `[node-main]` template of `/etc/asterisk/rpt.conf`. Existing node name
    sounds elsewhere are not changed or deleted.
-9. **Checks the installation** and lists anything that is wrong.
-10. **Offers to generate the sounds.** The telemetry prompts are generated
+10. **Checks the installation** and lists anything that is wrong.
+11. **Offers to generate the sounds.** The telemetry prompts are generated
     first, then the node names (see below for why the order matters).
-11. **Offers to restart Asterisk** if a config file was changed. Restarting
+12. **Offers to restart Asterisk** if a config file was changed. Restarting
     drops any active connections, so you can choose to do it later with
     `systemctl restart asterisk`.
 
@@ -552,13 +586,167 @@ sudo dectalk-telemetry.sh
 sudo write_node_callsigns_dectalk.sh -a -r
 ```
 
+## ElevenLabs
+
+[ElevenLabs](https://elevenlabs.io) makes natural sounding speech with the
+voices in your ElevenLabs voice library. It runs online, so every sound is
+made by sending its text to ElevenLabs, and every request uses credits from
+your plan. DECtalk runs on the node, is fast and costs nothing.
+
+The ElevenLabs scripts work like the DECtalk ones, with a few differences
+described here. Everything else in this README applies to both.
+
+### Installing with ElevenLabs
+
+Choose ElevenLabs when the installer asks for the speech engine. Instead of
+building DECtalk and setting its speaking rate, it:
+
+1. **Installs perl and curl** if they are missing (DECtalk's ffmpeg isn't
+   needed).
+2. **Asks for your API key.** Create one at
+   <https://elevenlabs.io/app/settings/api-keys>. Give it access to Text to
+   Speech, and read access to Voices and Models. Read access to User lets
+   the scripts show how many credits you have left. The key is checked, then
+   saved in `/opt/asl-telem/elevenlabs.conf`, which only root can read.
+3. **Asks for the model.** The default, Eleven v4 Turbo
+   (`eleven_v4_turbo`), is fast, natural and costs the least. Each model is
+   shown with the credits it uses per character. The v4 models speak many
+   languages and have no English-only version, so the scripts always tell
+   them the text is English (`LANGUAGE=en`), which keeps numbers and call
+   signs in English. Eleven Flash v2 is English only, but older.
+4. **Asks for the voice and its speed.** All the voices in your library are
+   listed; add more at <https://elevenlabs.io/app/voice-library>. The speed
+   can be Slow (0.8), Relaxed (0.9), Normal (1.0, the voice's own pace),
+   Brisk (1.1), Fast (1.2), or anything from 0.7 to 1.2, which is what
+   ElevenLabs allows. You can hear a preview on a local node, as for
+   DECtalk; each preview uses about 80 characters of credits. After the
+   preview you can play it again, try another voice or speed, or keep it.
+5. **Offers to generate the sounds**, and asks how the node names should be
+   made (see below).
+
+### ElevenLabs settings
+
+`/opt/asl-telem/elevenlabs.conf` has one `KEY=VALUE` per line:
+
+| Setting | Meaning |
+| --- | --- |
+| `API_KEY` | Your ElevenLabs API key. |
+| `VOICE_ID`, `VOICE_NAME` | The voice used by all the scripts. |
+| `MODEL_ID` | The model (default `eleven_v4_turbo`). |
+| `LANGUAGE` | Sent to the models that take it (default `en`). |
+| `SPEED` | 0.7 to 1.2; 1.0 is the voice's normal pace. |
+| `STABILITY`, `SIMILARITY` | Optional voice settings, 0 to 1. Without them the voice's own settings are used. |
+| `NODE_METHOD` | `join` or `speak`: how node names are made (see below). |
+| `JOBS` | How many requests are sent at once (default 2). Your plan limits how many it accepts at a time. |
+| `API_URL` | Default `https://api.elevenlabs.io`. |
+
+The easiest way to change them is to run `sudo asl-telem-setup.sh`. If you edit
+the file by hand, regenerate the sounds as described below.
+
+### ElevenLabs telemetry prompts
+
+```sh
+sudo elevenlabs-telemetry.sh
+```
+
+The prompts are in `/opt/asl-telem/elevenlabs-prompt-list.txt`, in the same
+format as `prompt-list.txt` but in plain English: DECtalk's phonemes and
+commands would be read out. Single letters are written in upper case,
+because ElevenLabs reads a lower case letter as a sound ("b" as "buh", "y"
+as "yeah"). The letters it still gets wrong are spelled as they sound: B,
+C, D, E, G, P, V and Y are "Bee", "See", "Dee", "Ee", "Gee", "Pee", "Vee"
+and "Why". Before anything is sent, the script shows how
+many characters and credits it will use, and asks to continue (`-f` doesn't
+ask).
+
+ElevenLabs charges for every request, so a prompt is only made again when
+its text or the voice settings have changed. What each prompt was made
+with is kept in `/usr/share/asterisk/sounds/custom/.elevenlabs-prompts`.
+Use `-r` to make all of them again. Running `dectalk-telemetry.sh` deletes
+that record, so switching back to ElevenLabs makes every prompt again.
+
+ElevenLabs' audio is converted for Asterisk: silence is trimmed from both
+ends, the level is set to -24 dB RMS with peaks kept below -1 dB, and it is
+saved as 8 kHz u-law.
+
+### ElevenLabs node names
+
+```sh
+sudo write_node_callsigns_elevenlabs.sh -a
+```
+
+It takes all the options of `write_node_callsigns_dectalk.sh`, uses the
+same overrides file, and saves the announcements in the same place. Node
+names can be made in two ways:
+
+ElevenLabs gets call signs differently from DECtalk. A call sign is sent
+as one upper case word, `N2DYI`, rather than letter by letter, which it
+spells more reliably. Phonetic call signs are sent without commas:
+"November 2 Delta Yankee India." DECtalk's pause after a VA or VE prefix,
+its stress on a final I, and its phonemes for Delta and Papa are not used.
+
+- **Joined** (`-J`, `NODE_METHOD=join`, the default). Each announcement is
+  put together from the letter, digit and phonetic alphabet sounds of the
+  telemetry prompts, with short pauses between them (longer ones between
+  phonetic alphabet words). It uses no credits and
+  is fast, but sounds less natural. Make the telemetry prompts first. If
+  you change the voice, make the telemetry prompts and then the node names
+  (`-a -r`) again, so they match.
+- **Spoken** (`-S`, `NODE_METHOD=speak`). Each announcement is one
+  ElevenLabs request, so it sounds the most natural. Every node uses
+  credits: about 6 characters for a call sign, about 30 for a phonetic
+  one, and more with `-i`. There are tens of thousands of nodes,
+  so a full build can use a large part of a monthly plan. Nodes that say
+  the same thing are still made only once. Later runs only send the new
+  and changed nodes.
+
+Before it starts, the script shows how many requests, characters and
+credits a run will use, and asks to continue (unless `-f` is given).
+
+Custom text (`text NODE = ...` or `-t`) is always spoken by ElevenLabs,
+even when joining. DECtalk commands in custom text, such as `[:ra 200]`,
+would be read aloud, so remove them if you switch to ElevenLabs.
+
+For cron, use `write_node_callsigns_elevenlabs.sh -f`, with `-i` or `-P` if
+you use them. It uses the `NODE_METHOD` in `elevenlabs.conf`.
+
+### Speaking your own text with ElevenLabs
+
+`elevenlabs-speak.sh` works like `dectalk-speak.sh`, with the voice saved
+in `elevenlabs.conf`, and shares its default node. Every line spoken uses
+credits. It always needs root, because only root can read the API key.
+
+```sh
+echo "The net starts in five minutes." | sudo elevenlabs-speak.sh
+sudo elevenlabs-speak.sh -V                 # list the voices in your library
+sudo elevenlabs-speak.sh -v Rachel -i -g    # another voice, this time only
+```
+
+It has the same options as `dectalk-speak.sh`, plus:
+
+| Option | Description |
+| --- | --- |
+| `-v VOICE` | Use another voice from your library this time: its name or voice ID. |
+| `-V` | List the voices in your library, with the saved one marked. |
+
+### Switching engines
+
+Run `sudo asl-telem-setup.sh` and choose the other engine. It sets up what the
+new engine needs, then regenerates the telemetry prompts and node names
+with it (the node names with `-r`, so every one is made again). Update your
+crontab to run the matching node name script.
+
 ## Uninstalling
 
 Remove what the installer added. This also deletes your
-`node-overrides.conf`, so copy it somewhere first if you want to keep it.
+`node-overrides.conf` and `elevenlabs.conf`, so copy them somewhere first if
+you want to keep them. You may also want to delete the API key in your
+ElevenLabs account.
 
 ```sh
 sudo rm -f /usr/local/bin/dectalk-telemetry.sh /usr/local/bin/write_node_callsigns_dectalk.sh /usr/local/bin/dectalk-speak.sh /usr/local/bin/dectalk-telemetry-upgrade.sh
+sudo rm -f /usr/local/bin/elevenlabs-telemetry.sh /usr/local/bin/write_node_callsigns_elevenlabs.sh /usr/local/bin/elevenlabs-speak.sh
+sudo rm -f /usr/local/bin/asl-telem-setup.sh
 sudo rm -rf /run/asl-telem
 sudo rm -rf /opt/asl-telem
 sudo rm -f /var/lib/asterisk/previous_astdb.txt /var/lib/asterisk/previous_node_overrides.conf

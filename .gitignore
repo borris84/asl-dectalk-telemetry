@@ -3,3 +3,7 @@ write_node_callsigns.sh
 
 # Saved by dectalk-speak.sh when it is run from the repository
 speak-node.conf
+
+# ElevenLabs settings (with the API key), if the scripts are run from the
+# repository
+elevenlabs.conf

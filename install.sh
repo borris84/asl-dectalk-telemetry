@@ -4,18 +4,27 @@
 # Copyright (C) 2026 N2DYI
 # Licensed under the GNU General Public License, version 2. See LICENSE.
 #
-# Install the DECtalk telemetry and node name scripts on an ASL3 node:
+# Install the telemetry and node name scripts on an ASL3 node, with
+# DECtalk or ElevenLabs as the speech engine:
 #   1. Check that this is ASL3 (and not HamVoIP)
-#   2. Build and install DECtalk's "say" if it is not already working
-#   3. Install ffmpeg and perl if missing (the scripts need them)
-#   4. Turn on ASL3's automatic astdb.txt (node database) updates
-#   5. Copy the scripts and their data files to /opt/asl-telem and link
+#   2. Choose the speech engine (saved in /opt/asl-telem/engine.conf)
+#   3. DECtalk: build and install DECtalk's "say" if it is not already
+#      working
+#   4. Install the programs the scripts need if missing (DECtalk: ffmpeg
+#      and perl; ElevenLabs: perl and curl)
+#   5. Turn on ASL3's automatic astdb.txt (node database) updates
+#   6. Copy the scripts and their data files to /opt/asl-telem and link
 #      the scripts into /usr/local/bin so they are on the PATH
-#   6. Choose the speaking rate, with an optional preview played on a
-#      local node
-#   7. Enable custom sounds in /etc/asterisk/asterisk.conf
-#   8. Point nodenames in /etc/asterisk/rpt.conf at custom/rpt/nodenames
-#   9. Check the install, then offer to generate the sounds
+#   7. DECtalk: choose the speaking rate. ElevenLabs: enter the API key,
+#      choose the model, the voice and its speed (saved in
+#      /opt/asl-telem/elevenlabs.conf). Either with an optional preview
+#      played on a local node
+#   8. Enable custom sounds in /etc/asterisk/asterisk.conf
+#   9. Point nodenames in /etc/asterisk/rpt.conf at custom/rpt/nodenames
+#  10. Check the install, then offer to generate the sounds
+#
+# Once installed, it is kept as /opt/asl-telem/install.sh and linked as
+# /usr/local/bin/asl-telem-setup.sh, to change the settings later.
 #
 # Run it as root from the directory that holds the scripts, or straight
 # from GitHub:
@@ -31,7 +40,7 @@
 
 set -uo pipefail
 
-VERSION=0.19
+VERSION=0.20
 REPO=borris84/asl-dectalk-telemetry
 RELEASE_URL="https://github.com/$REPO/archive/refs/tags/v$VERSION.tar.gz"
 DOWNLOAD_DIR=/usr/local/src/asl-dectalk-telemetry-$VERSION
@@ -58,13 +67,32 @@ ASTDB_UNITS=(asl3-update-astdb.service asl3-update-astdb.timer)
 TELEM_SCRIPT=dectalk-telemetry.sh
 NODES_SCRIPT=write_node_callsigns_dectalk.sh
 SPEAK_SCRIPT=dectalk-speak.sh
+EL_TELEM_SCRIPT=elevenlabs-telemetry.sh
+EL_NODES_SCRIPT=write_node_callsigns_elevenlabs.sh
+EL_SPEAK_SCRIPT=elevenlabs-speak.sh
 UPGRADE_SCRIPT=dectalk-telemetry-upgrade.sh
-SCRIPTS=("$TELEM_SCRIPT" "$NODES_SCRIPT" "$SPEAK_SCRIPT" "$UPGRADE_SCRIPT")
-DATA_FILES=(dec-init.cfg prompt-list.txt)
+# This installer is kept in INSTALL_DIR and linked into BIN_DIR under
+# this name, so settings can be changed later without the repository.
+SETUP_SCRIPT=install.sh
+SETUP_LINK=asl-telem-setup.sh
+SCRIPTS=("$TELEM_SCRIPT" "$NODES_SCRIPT" "$SPEAK_SCRIPT"
+    "$EL_TELEM_SCRIPT" "$EL_NODES_SCRIPT" "$EL_SPEAK_SCRIPT" "$UPGRADE_SCRIPT")
+# Code the scripts load: always replaced, not put on the PATH.
+LIB_FILES=(elevenlabs-common.sh)
+DATA_FILES=(dec-init.cfg prompt-list.txt elevenlabs-prompt-list.txt)
 # Installed only if missing: the user's own settings, never replaced.
 USER_FILES=(node-overrides.conf)
 
 VERSION_FILE=$INSTALL_DIR/VERSION
+# The chosen speech engine, for the installer and anything else to read.
+ENGINE_FILE=$INSTALL_DIR/engine.conf
+ENGINE=""
+OLD_ENGINE=""
+ENGINE_CHANGED=0
+# Set when the ElevenLabs model, voice or speed changes, so the node names
+# are made again.
+EL_CHANGED=0
+EL_URL=https://elevenlabs.io
 STAMP=$(date +%Y%m%d-%H%M%S)
 ASTERISK_RESTART_NEEDED=0
 MODE=install
@@ -91,6 +119,31 @@ RATE_MAX=600
 RATE_CHANGED=0
 PREVIEW_DIR=""
 PREVIEW_NODE=""
+STEP_NO=0
+
+# ElevenLabs models offered, best choice first: "model_id|description".
+# Only those the account can use are shown. The v4 models have no
+# English-only version; they are told the text is English (LANGUAGE=en in
+# elevenlabs.conf), which keeps them from reading numbers in another
+# language.
+EL_MODEL_CHOICES=(
+    "eleven_v4_turbo|Eleven v4 Turbo: fast and natural, and costs the least"
+    "eleven_v4|Eleven v4: the most natural and expressive, but slower"
+    "eleven_flash_v2|Eleven Flash v2: English only, fast, older and less natural"
+    "eleven_flash_v2_5|Eleven Flash v2.5: fast and low cost, older"
+    "eleven_multilingual_v2|Eleven Multilingual v2: older, reads numbers carefully"
+)
+# ElevenLabs speeds: "label|speed". It allows 0.7 to 1.2.
+EL_SPEED_PRESETS=(
+    "Slow|0.8"
+    "Relaxed|0.9"
+    "Normal|1.0"
+    "Brisk|1.1"
+    "Fast|1.2"
+)
+EL_SPEED_DEFAULT_CHOICE=3
+EL_SPEED_MIN=0.7
+EL_SPEED_MAX=1.2
 
 die() {
     printf 'Error: %s\n' "$*" >&2
@@ -136,8 +189,9 @@ ask_number() {
 }
 
 step() {
+    STEP_NO=$((STEP_NO + 1))
     echo
-    echo "Step $1: $2"
+    echo "Step $STEP_NO: $1"
     echo
 }
 
@@ -199,7 +253,7 @@ nodenames_configured() {
     [[ -n $values ]] && ! grep -qvxF "$NODENAMES_DIR" <<< "$values"
 }
 
-# --- Step 1: DECtalk -------------------------------------------------------
+# --- DECtalk -------------------------------------------------------
 
 # assemble_dectalk SRC DEST  - copy what say needs from a US English build
 # in SRC (dectalk/src) into DEST, laid out as upstream's "make install"
@@ -308,7 +362,7 @@ install_dectalk() {
 }
 
 step_dectalk() {
-    step 1 "DECtalk speech synthesizer"
+    step "DECtalk speech synthesizer"
     if dectalk_works; then
         echo "DECtalk is already installed and working ($SAY -> $(readlink -f "$SAY"))."
         return
@@ -328,16 +382,28 @@ step_dectalk() {
     install_dectalk
 }
 
-# --- Step 2: other packages ------------------------------------------------
+# --- other packages ------------------------------------------------
+
+# Print the name of the chosen engine's node name script.
+nodes_script() {
+    if [[ $ENGINE == elevenlabs ]]; then echo "$EL_NODES_SCRIPT"; else echo "$NODES_SCRIPT"; fi
+}
+
+# Print the programs the chosen engine's scripts need.
+needed_programs() {
+    if [[ $ENGINE == elevenlabs ]]; then echo perl curl; else echo ffmpeg perl; fi
+}
 
 step_packages() {
     local -a missing=()
-    step 2 "Other required programs"
+    local p
+    step "Other required programs"
 
-    command -v ffmpeg > /dev/null || missing+=(ffmpeg)
-    command -v perl > /dev/null || missing+=(perl)
+    for p in $(needed_programs); do
+        command -v "$p" > /dev/null || missing+=("$p")
+    done
     if (( ${#missing[@]} == 0 )); then
-        echo "ffmpeg and perl are already installed."
+        echo "$(needed_programs | sed 's/ / and /') are already installed."
         return
     fi
 
@@ -348,16 +414,16 @@ step_packages() {
         || die "Could not install ${missing[*]}"
 }
 
-# --- Step 3: node database -------------------------------------------------
+# --- node database -------------------------------------------------
 
 step_node_database() {
     local nodes
-    step 3 "AllStarLink node database ($ASTDB)"
+    step "AllStarLink node database ($ASTDB)"
 
     if ! dpkg-query -W -f='${Status}' asl3-update-nodelist 2> /dev/null | grep -q 'install ok installed'; then
         echo "The asl3-update-nodelist package, which downloads $ASTDB,"
         echo "is not installed."
-        ask_yn "Install it now?" y || die "$NODES_SCRIPT needs $ASTDB. Installation stopped."
+        ask_yn "Install it now?" y || die "$(nodes_script) needs $ASTDB. Installation stopped."
         apt-get update || die "apt-get update failed"
         DEBIAN_FRONTEND=noninteractive apt-get install -y asl3-update-nodelist \
             || die "Could not install asl3-update-nodelist"
@@ -368,7 +434,7 @@ step_node_database() {
         return
     fi
 
-    echo "$NODES_SCRIPT reads each node's call sign from $ASTDB."
+    echo "$(nodes_script) reads each node's call sign from $ASTDB."
     echo "ASL3 downloads that file with the asl3-update-astdb service and timer,"
     echo "which are turned off by default. Turning them on downloads the file"
     echo "now, then again at every boot and every 6 hours."
@@ -377,7 +443,7 @@ step_node_database() {
         if [[ -s $ASTDB ]]; then
             echo "Skipped. $ASTDB will not be kept up to date, so new and changed nodes won't be announced."
         else
-            echo "Skipped. $NODES_SCRIPT will not work until $ASTDB exists."
+            echo "Skipped. $(nodes_script) will not work until $ASTDB exists."
         fi
         return
     fi
@@ -396,17 +462,19 @@ step_node_database() {
     fi
 }
 
-# --- Step 4: scripts -------------------------------------------------------
+# --- scripts -------------------------------------------------------
 
 step_scripts() {
-    step 4 "Install the scripts"
+    step "Install the scripts"
 
     echo "The scripts and their data files will be copied to $INSTALL_DIR,"
     echo "and the scripts will be linked into $BIN_DIR so they can be run"
-    echo "from anywhere."
+    echo "from anywhere. This installer is kept there too, as $SETUP_LINK,"
+    echo "to change the speech engine, voice or other settings later."
     echo
     ask_yn "Continue?" y || die "Installation stopped."
     install_files
+    save_engine
 }
 
 # Copy the scripts and data files into INSTALL_DIR and link the scripts
@@ -416,8 +484,50 @@ install_files() {
 
     mkdir -p -- "$INSTALL_DIR" || die "Could not create $INSTALL_DIR"
 
+    # Run as asl-telem-setup.sh, the files are already in place.
+    if running_installed_copy; then
+        echo "The files in $INSTALL_DIR are already installed."
+    else
+        copy_files
+    fi
+
+    for f in "${SCRIPTS[@]}"; do
+        link="$BIN_DIR/$f"
+        if [[ -e $link && ! -L $link ]]; then
+            mv -- "$link" "$link.bak-$STAMP" || die "Could not move the old $link aside"
+            echo "Moved the old $link to $link.bak-$STAMP"
+        fi
+        ln -sfn -- "$INSTALL_DIR/$f" "$link" || die "Could not link $link"
+        echo "Linked $link -> $INSTALL_DIR/$f"
+    done
+    link="$BIN_DIR/$SETUP_LINK"
+    if [[ -e $link && ! -L $link ]]; then
+        mv -- "$link" "$link.bak-$STAMP" || die "Could not move the old $link aside"
+        echo "Moved the old $link to $link.bak-$STAMP"
+    fi
+    ln -sfn -- "$INSTALL_DIR/$SETUP_SCRIPT" "$link" || die "Could not link $link"
+    echo "Linked $link -> $INSTALL_DIR/$SETUP_SCRIPT"
+
+    echo "$VERSION" > "$VERSION_FILE" || die "Could not write $VERSION_FILE"
+}
+
+# True when this is the copy of the installer kept in INSTALL_DIR.
+running_installed_copy() {
+    [[ -n $SRC_DIR && $SRC_DIR -ef $INSTALL_DIR ]]
+}
+
+# Copy the scripts, the installer and the data files into INSTALL_DIR.
+copy_files() {
+    local f src dest
+
+    install -m 755 -- "$SRC_DIR/$SETUP_SCRIPT" "$INSTALL_DIR/$SETUP_SCRIPT" || die "Could not copy $SETUP_SCRIPT"
+    echo "Installed $INSTALL_DIR/$SETUP_SCRIPT"
     for f in "${SCRIPTS[@]}"; do
         install -m 755 -- "$SRC_DIR/$f" "$INSTALL_DIR/$f" || die "Could not copy $f"
+        echo "Installed $INSTALL_DIR/$f"
+    done
+    for f in "${LIB_FILES[@]}"; do
+        install -m 644 -- "$SRC_DIR/$f" "$INSTALL_DIR/$f" || die "Could not copy $f"
         echo "Installed $INSTALL_DIR/$f"
     done
 
@@ -451,21 +561,304 @@ install_files() {
             echo "Installed $dest"
         fi
     done
-
-    for f in "${SCRIPTS[@]}"; do
-        link="$BIN_DIR/$f"
-        if [[ -e $link && ! -L $link ]]; then
-            mv -- "$link" "$link.bak-$STAMP" || die "Could not move the old $link aside"
-            echo "Moved the old $link to $link.bak-$STAMP"
-        fi
-        ln -sfn -- "$INSTALL_DIR/$f" "$link" || die "Could not link $link"
-        echo "Linked $link -> $INSTALL_DIR/$f"
-    done
-
-    echo "$VERSION" > "$VERSION_FILE" || die "Could not write $VERSION_FILE"
 }
 
-# --- Step 5: speaking rate -------------------------------------------------
+# --- Speech engine ---------------------------------------------------------
+
+# Print the engine saved in ENGINE_FILE, or nothing.
+saved_engine() {
+    [[ -f $ENGINE_FILE ]] || return 0
+    sed -nE 's/^[[:space:]]*ENGINE[[:space:]]*=[[:space:]]*(dectalk|elevenlabs)[[:space:]]*$/\1/p' "$ENGINE_FILE" | head -n 1
+}
+
+engine_name() {
+    if [[ $1 == elevenlabs ]]; then echo ElevenLabs; else echo DECtalk; fi
+}
+
+# Ask which engine to use, before anything is changed. It is saved with
+# the scripts (save_engine).
+choose_engine() {
+    local default=1
+    OLD_ENGINE=$(saved_engine)
+    # An install from before ElevenLabs was offered uses DECtalk.
+    [[ -z $OLD_ENGINE && -f $INSTALL_DIR/$TELEM_SCRIPT ]] && OLD_ENGINE=dectalk
+    [[ $OLD_ENGINE == elevenlabs ]] && default=2
+
+    if [[ -n $OLD_ENGINE ]]; then
+        echo "The announcements are currently made with $(engine_name "$OLD_ENGINE")."
+        echo
+    fi
+    echo "Which speech engine should make the announcements?"
+    echo "  1) DECtalk     Runs on this node: fast, free, and needs no internet"
+    echo "                 connection once installed. The classic synthesized voice."
+    echo "  2) ElevenLabs  Natural sounding voices from ElevenLabs' online service."
+    echo "                 Needs an ElevenLabs plan with API access. Every sound made"
+    echo "                 uses credits, and announcing each node by its call sign"
+    echo "                 can use a lot of them (there are tens of thousands of nodes)."
+    ask_number 2 "$default"
+    if (( CHOICE == 2 )); then ENGINE=elevenlabs; else ENGINE=dectalk; fi
+    [[ -n $OLD_ENGINE && $ENGINE != "$OLD_ENGINE" ]] && ENGINE_CHANGED=1
+    return 0
+}
+
+save_engine() {
+    printf '# Speech engine chosen with install.sh: dectalk or elevenlabs.\nENGINE=%s\n' "$ENGINE" \
+        > "$ENGINE_FILE" || die "Could not write $ENGINE_FILE"
+    echo "Saved the speech engine ($(engine_name "$ENGINE")) in $ENGINE_FILE"
+}
+
+# --- ElevenLabs --------------------------------------------------------------
+
+save_el_config() {
+    el_defaults
+    el_save_config || die "Could not write $EL_CONF"
+}
+
+# What changes the sound of the ElevenLabs announcements.
+el_signature() {
+    echo "$EL_MODEL_ID|$EL_VOICE_ID|$EL_SPEED|$EL_LANGUAGE|${EL_STABILITY:-}|${EL_SIMILARITY:-}"
+}
+
+step_el_key() {
+    local key count
+    step "ElevenLabs API key"
+
+    el_load_config || el_defaults
+    EL_START_SIGNATURE=$(el_signature)
+    if [[ -n $EL_API_KEY ]]; then
+        echo "An API key is saved in $EL_CONF (ending in ...${EL_API_KEY: -4})."
+        if el_voices; then
+            count=$(grep -c . <<< "$EL_VOICE_LIST")
+            echo "It works: your voice library has $count voices."
+            ask_yn "Keep using this key?" y && return
+        else
+            echo "It does not work: $EL_ERROR"
+        fi
+        echo
+    fi
+
+    echo "The ElevenLabs scripts need an API key from your ElevenLabs account,"
+    echo "and your plan must include API access. If you don't have a key yet,"
+    echo "sign in to $EL_URL and create one at:"
+    echo
+    echo "  $EL_KEYS_URL"
+    echo
+    echo "Give the key access to Text to Speech, and read access to Voices and"
+    echo "Models. Read access to User lets the scripts show the credits you have"
+    echo "left. The key is saved in $EL_CONF, which only root can read."
+    echo
+    while true; do
+        read -r -s -p "Paste your API key (it is not shown), or press Enter to stop: " key \
+            || { echo; die "No answer given. Installation stopped."; }
+        echo
+        key=${key//[[:space:]]/}
+        [[ -n $key ]] || die "The ElevenLabs scripts need an API key. Installation stopped."
+        EL_API_KEY=$key
+        echo "Checking the key..."
+        if el_voices; then
+            count=$(grep -c . <<< "$EL_VOICE_LIST")
+            echo "The key works: your voice library has $count voices."
+            break
+        fi
+        echo "That key did not work: $EL_ERROR"
+        echo
+    done
+    save_el_config
+    echo "Saved the API key in $EL_CONF"
+}
+
+step_el_model() {
+    local -a ids=() descs=()
+    local entry id desc rate i default=1 note current_listed=0
+    step "ElevenLabs model"
+
+    if ! el_models; then
+        echo "The model list could not be read ($EL_ERROR)."
+        echo "Using ${EL_MODEL_ID:-$EL_DEFAULT_MODEL}."
+        save_el_config
+        return
+    fi
+    for entry in "${EL_MODEL_CHOICES[@]}"; do
+        IFS='|' read -r id desc <<< "$entry"
+        grep -q "^$id"$'\t' <<< "$EL_MODEL_LIST" || continue
+        ids+=("$id")
+        descs+=("$desc")
+    done
+    if (( ${#ids[@]} == 0 )); then
+        echo "None of the usual models are available to your account. Using $EL_MODEL_ID."
+        save_el_config
+        return
+    fi
+
+    echo "The model is the engine ElevenLabs speaks with. The text is always sent"
+    echo "as English, so numbers and call signs are read in English."
+    echo
+    echo "Choose a model:"
+    for i in "${!ids[@]}"; do
+        rate=$(awk -F'\t' -v m="${ids[$i]}" '$1 == m { print $3; exit }' <<< "$EL_MODEL_LIST")
+        note=""
+        (( i == 0 )) && note=" (recommended)"
+        if [[ ${ids[$i]} == "$EL_MODEL_ID" ]]; then
+            default=$((i + 1))
+            current_listed=1
+            note+=" (current)"
+        fi
+        printf '  %d) %s%s\n' $((i + 1)) "${descs[$i]}" "$note"
+        # "1 credit", but "0.5 credits" and "2 credits"
+        if awk -v r="$rate" 'BEGIN { exit !(r == 1) }'; then
+            printf '     %s credit per character\n' "$rate"
+        else
+            printf '     %s credits per character\n' "$rate"
+        fi
+    done
+    # A model set by hand that isn't listed can be kept.
+    if (( ! current_listed )) && [[ -n $EL_MODEL_ID ]]; then
+        ids+=("$EL_MODEL_ID")
+        default=${#ids[@]}
+        printf '  %d) Keep the current model: %s\n' "$default" "$EL_MODEL_ID"
+    fi
+    ask_number "${#ids[@]}" "$default"
+    EL_MODEL_ID=${ids[$((CHOICE - 1))]}
+    save_el_config
+    echo "Using $EL_MODEL_ID."
+}
+
+# Put the chosen voice in EL_VOICE_ID and EL_VOICE_NAME.
+choose_voice() {
+    local -a vids=() vnames=()
+    local id name desc i=0 default=1
+    echo "Voices in your ElevenLabs library:"
+    while IFS=$'\t' read -r id name desc; do
+        vids+=("$id")
+        vnames+=("$name")
+        i=$((i + 1))
+        [[ $id == "$EL_VOICE_ID" ]] && default=$i
+        printf '  %2d) %s%s%s\n' "$i" "$name" "${desc:+ ($desc)}" "$( [[ $id == "$EL_VOICE_ID" ]] && echo " (current)")"
+    done <<< "$EL_VOICE_LIST"
+    echo "Add more voices to your library at $EL_URL/app/voice-library"
+    ask_number "${#vids[@]}" "$default"
+    EL_VOICE_ID=${vids[$((CHOICE - 1))]}
+    EL_VOICE_NAME=${vnames[$((CHOICE - 1))]}
+}
+
+# Put the chosen speed in EL_SPEED.
+choose_speed() {
+    local i label speed default=$EL_SPEED_DEFAULT_CHOICE note custom answer
+    echo "How fast should $EL_VOICE_NAME speak?"
+    for i in "${!EL_SPEED_PRESETS[@]}"; do
+        IFS='|' read -r label speed <<< "${EL_SPEED_PRESETS[$i]}"
+        note=""
+        (( i + 1 == EL_SPEED_DEFAULT_CHOICE )) && note=" (the voice's normal pace)"
+        awk -v a="$speed" -v b="$EL_SPEED" 'BEGIN { exit !(a + 0 == b + 0) }' \
+            && { default=$((i + 1)); note+=" (current)"; }
+        printf '  %d) %-8s %s%s\n' $((i + 1)) "$label" "$speed" "$note"
+    done
+    custom=$(( ${#EL_SPEED_PRESETS[@]} + 1 ))
+    printf '  %d) %-8s enter a speed from %s to %s\n' "$custom" "Custom" "$EL_SPEED_MIN" "$EL_SPEED_MAX"
+    ask_number "$custom" "$default"
+    if (( CHOICE < custom )); then
+        IFS='|' read -r label EL_SPEED <<< "${EL_SPEED_PRESETS[$((CHOICE - 1))]}"
+        return
+    fi
+    while true; do
+        read -r -p "Speed ($EL_SPEED_MIN-$EL_SPEED_MAX) [$EL_SPEED]: " answer \
+            || { echo; die "No answer given. Installation stopped."; }
+        [[ -z $answer ]] && answer=$EL_SPEED
+        if [[ $answer =~ ^[0-9]*\.?[0-9]+$ ]] \
+            && awk -v a="$answer" -v lo="$EL_SPEED_MIN" -v hi="$EL_SPEED_MAX" 'BEGIN { exit !(a >= lo && a <= hi) }'; then
+            EL_SPEED=$answer
+            return
+        fi
+        echo "Please enter a number from $EL_SPEED_MIN to $EL_SPEED_MAX, for example 1.05."
+    done
+}
+
+# Make the preview folder, which Asterisk (its own user) must be able to
+# read. Returns 1 if it can't be made.
+make_preview_dir() {
+    [[ -n $PREVIEW_DIR ]] && return 0
+    PREVIEW_DIR=$(mktemp -d "$INSTALL_DIR/preview.XXXXXX") \
+        && chmod 755 -- "$PREVIEW_DIR" \
+        || { echo "Could not create a folder for the preview."; PREVIEW_DIR=""; return 1; }
+}
+
+# The sample announcements spoken by a preview.
+preview_text() {
+    local digits
+    digits=$(sed 's/./& /g; s/ $//' <<< "$PREVIEW_NODE")
+    echo "Node $digits. Connected to node 2 0 0 0. The time is 3:15 PM. All links disconnected."
+}
+
+# Play the chosen voice on a local node until the user decides. Prints
+# nothing and returns 0 to use it, or returns 1 with CHOICE 2 (another
+# voice) or 3 (another speed).
+preview_el_voice() {
+    make_preview_dir || return 0
+    echo "Making the preview with ElevenLabs..."
+    if ! el_render "$(preview_text)" "$PREVIEW_DIR/preview.ul"; then
+        echo "The preview could not be made: $EL_ERROR"
+        return 0
+    fi
+    chmod 644 -- "$PREVIEW_DIR/preview.ul"
+    play_preview
+    while true; do
+        echo
+        echo "  1) Play it again"
+        echo "  2) Choose a different voice"
+        echo "  3) Choose a different speed"
+        echo "  4) Use this voice and speed"
+        ask_number 4 4
+        case $CHOICE in
+            1) play_preview ;;
+            2|3) return 1 ;;
+            4) return 0 ;;
+        esac
+    done
+}
+
+step_el_voice() {
+    local preview=0 pick_voice=1 chars
+    step "ElevenLabs voice and speed"
+
+    if [[ -z ${EL_VOICE_LIST:-} ]] && ! el_voices; then
+        die "Could not read your voice library: $EL_ERROR"
+    fi
+    while true; do
+        if (( pick_voice )); then
+            choose_voice
+            echo
+        fi
+        choose_speed
+
+        # Asked once: after "choose a different voice/speed" the loop goes
+        # straight back to the preview.
+        if (( ! preview )); then
+            chars=$(preview_text | wc -c)
+            echo
+            echo "You can hear a preview of this voice on a node on this system."
+            echo "It is played like any other announcement, so it is transmitted"
+            echo "if the node has a radio. Each preview made uses about $chars characters"
+            echo "of your ElevenLabs credits."
+            if ask_yn "Preview the voice on a local node?" y; then
+                choose_preview_node && preview=1
+            fi
+        fi
+        if (( preview )) && ! preview_el_voice; then
+            pick_voice=0
+            (( CHOICE == 2 )) && pick_voice=1
+            echo
+            continue
+        fi
+        break
+    done
+
+    save_el_config
+    echo "Using the voice $EL_VOICE_NAME at speed $EL_SPEED."
+    [[ $(el_signature) != "$EL_START_SIGNATURE" ]] && EL_CHANGED=1
+    return 0
+}
+
+# --- Speaking rate -------------------------------------------------
 
 # rate_setting TEXT  - print "RATE SPF" from DECtalk commands in TEXT.
 # Either is printed as 0 if TEXT doesn't set it.
@@ -603,9 +996,8 @@ choose_preview_node() {
 # commands in INIT into $PREVIEW_DIR/preview.ul, as dectalk-telemetry.sh
 # renders the prompts.
 render_preview() {
-    local init=$1 digits text out="$PREVIEW_DIR/preview.ul"
-    digits=$(sed 's/./& /g' <<< "$PREVIEW_NODE")
-    text="Node $digits. Connected to node 2 0 0 0. The time is 3 15 P M. All links disconnected."
+    local init=$1 text out="$PREVIEW_DIR/preview.ul"
+    text="$(preview_text | sed 's/3:15 PM/3 15 P M/')"
     "$SAY" -e 3 -fo stdout:raw -a "$init $text" < /dev/null 2> /dev/null \
         | ffmpeg -nostdin -v error -f mulaw -ar 8000 -ac 1 -i - \
             -af "silenceremove=start_periods=1:start_threshold=-50dB,areverse,silenceremove=start_periods=1:start_threshold=-50dB,areverse" \
@@ -623,13 +1015,7 @@ play_preview() {
 # Returns 0 to use this rate, 1 to choose another.
 preview_rate() {
     local init=$1
-    if [[ -z $PREVIEW_DIR ]]; then
-        # Asterisk runs as its own user, so the preview must be somewhere
-        # it can read.
-        PREVIEW_DIR=$(mktemp -d "$INSTALL_DIR/preview.XXXXXX") \
-            && chmod 755 -- "$PREVIEW_DIR" \
-            || { echo "Could not create a folder for the preview."; PREVIEW_DIR=""; return 0; }
-    fi
+    make_preview_dir || return 0
     if ! render_preview "$init"; then
         echo "DECtalk could not make the preview."
         return 0
@@ -651,7 +1037,7 @@ preview_rate() {
 
 step_speaking_rate() {
     local cfg cur_ra cur_spf new_cfg tmp preview=0
-    step 5 "Speaking rate"
+    step "Speaking rate"
 
     if [[ ! -f $DEC_INIT ]]; then
         echo "$DEC_INIT not found. Skipped."
@@ -699,11 +1085,11 @@ step_speaking_rate() {
     RATE_CHANGED=1
 }
 
-# --- Step 6: asterisk.conf -------------------------------------------------
+# --- asterisk.conf -------------------------------------------------
 
 step_asterisk_conf() {
     local tmp line
-    step 6 "Allow custom sounds in $ASTERISK_CONF"
+    step "Allow custom sounds in $ASTERISK_CONF"
 
     if custom_sounds_enabled; then
         echo "Custom sounds are already enabled (sounds_search_custom_dir = yes)."
@@ -736,12 +1122,12 @@ step_asterisk_conf() {
     ASTERISK_RESTART_NEEDED=1
 }
 
-# --- Step 7: rpt.conf ------------------------------------------------------
+# --- rpt.conf ------------------------------------------------------
 
 step_rpt_conf() {
     local values tmp line header
     local setting="nodenames = $NODENAMES_DIR ; DECtalk node name announcements"
-    step 7 "Point node names in $RPT_CONF at $NODENAMES_DIR"
+    step "Point node names in $RPT_CONF at $NODENAMES_DIR"
 
     if nodenames_configured; then
         echo "nodenames is already set to $NODENAMES_DIR."
@@ -749,7 +1135,7 @@ step_rpt_conf() {
         return
     fi
 
-    echo "$NODES_SCRIPT writes node name announcements to"
+    echo "$(nodes_script) writes node name announcements to"
     echo "$NODENAMES_DIR. Asterisk is told to use that directory with"
     echo "the nodenames setting in $RPT_CONF. Existing node name sounds"
     echo "elsewhere are not changed or deleted."
@@ -798,10 +1184,10 @@ step_rpt_conf() {
     ASTERISK_RESTART_NEEDED=1
 }
 
-# --- Step 8: verify --------------------------------------------------------
+# --- verify --------------------------------------------------------
 
 step_verify() {
-    step 8 "Check the installation"
+    step "Check the installation"
     if ! run_checks; then
         echo "Fix them and run this installer again before generating the sounds."
         return 1
@@ -823,13 +1209,21 @@ run_checks() {
         fi
     }
 
-    check "DECtalk speaks ($SAY)" dectalk_works
-    check "ffmpeg is installed" 'command -v ffmpeg > /dev/null'
-    check "perl is installed" 'command -v perl > /dev/null'
+    if [[ $ENGINE == elevenlabs ]]; then
+        el_load_config || el_defaults
+        check "$EL_CONF has an API key and a voice" el_configured
+        check "The ElevenLabs API key works" 'el_configured && el_voices 2> /dev/null'
+    else
+        check "DECtalk speaks ($SAY)" dectalk_works
+    fi
+    for f in $(needed_programs); do
+        check "$f is installed" "command -v $f > /dev/null"
+    done
     for f in "${SCRIPTS[@]}"; do
         check "$f is on the PATH" "[[ \$(command -v $f) == $BIN_DIR/$f && -x $INSTALL_DIR/$f ]]"
     done
-    for f in "${DATA_FILES[@]}"; do
+    check "$SETUP_LINK is on the PATH" "[[ \$(command -v $SETUP_LINK) == $BIN_DIR/$SETUP_LINK && -x $INSTALL_DIR/$SETUP_SCRIPT ]]"
+    for f in "${LIB_FILES[@]}" "${DATA_FILES[@]}"; do
         check "$INSTALL_DIR/$f is present" "[[ -f $INSTALL_DIR/$f ]]"
     done
     check "Node database updates are on (asl3-update-astdb.timer)" astdb_updates_on
@@ -844,11 +1238,19 @@ run_checks() {
     fi
 }
 
-# --- Step 9: generate sounds -----------------------------------------------
+# --- generate sounds -----------------------------------------------
 
 step_generate() {
+    if [[ $ENGINE == elevenlabs ]]; then
+        step_generate_el
+    else
+        step_generate_dectalk
+    fi
+}
+
+step_generate_dectalk() {
     local -a args=(-a)
-    step 9 "Generate the sounds"
+    step "Generate the sounds"
 
     echo "The telemetry prompts must be generated before the node names."
     echo "$TELEM_SCRIPT can rename or delete the whole custom sounds"
@@ -865,7 +1267,7 @@ step_generate() {
     echo "database. A full build can take a long time on a Raspberry Pi."
     if ask_yn "Generate the node name announcements now ($NODES_SCRIPT)?" y; then
         # Existing announcements are only rebuilt with -r.
-        (( RATE_CHANGED )) && args+=(-r)
+        (( RATE_CHANGED || ENGINE_CHANGED )) && args+=(-r)
         echo
         echo "Each announcement can be followed by the node number,"
         echo "for example \"N 2 D Y I, node 5 0 6 3 1 1\"."
@@ -875,7 +1277,7 @@ step_generate() {
         echo "phonetic alphabet (\"November, 2, Delta, Yankee, India\")."
         ask_yn "Speak call signs phonetically?" n && args+=(-P)
         if "$BIN_DIR/$NODES_SCRIPT" "${args[@]}"; then
-            nodes_reminder "${args[@]}"
+            nodes_reminder "$NODES_SCRIPT" "${args[@]}"
         else
             echo "$NODES_SCRIPT reported a problem (see above)."
         fi
@@ -884,17 +1286,114 @@ step_generate() {
     fi
 }
 
-# nodes_reminder ARGS  - after the node names are built with ARGS, explain
-# how to keep them current, and that the installer can be run again.
+# astdb_size PHONETIC NUMBER  - print "nodes announcements characters" for
+# the node database: how many nodes there are, how many different
+# announcements they need, and about how many characters speaking them
+# would send to ElevenLabs. As in write_node_callsigns_dectalk.sh, nodes
+# with the same call sign share one announcement unless the node number is
+# spoken (NUMBER=1). Call signs are sent as they are, or about 5.5 times as
+# long as phonetic words (PHONETIC=1).
+astdb_size() {
+    awk -F'|' -v phon="$1" -v num="$2" '
+        /^;/ || NF < 2 || $1 == "" { next }
+        { call[$1] = $2 }
+        END {
+            f = phon ? 5.5 : 1.1
+            for (n in call) {
+                nodes++
+                if (num) { said++; c += f * length(call[n]) + 7 + 2 * length(n) }
+                else if (!(call[n] in seen)) { seen[call[n]] = 1; said++; c += f * length(call[n]) }
+            }
+            printf "%d %d %d\n", nodes, said, c
+        }
+    ' "$ASTDB" 2> /dev/null || echo "0 0 0"
+}
+
+step_generate_el() {
+    local -a args=(-a)
+    local nodes said chars rate credits method default phon=0 num=0
+    step "Generate the sounds"
+
+    echo "The telemetry prompts must be generated before the node names."
+    echo "$EL_TELEM_SCRIPT can rename or delete the whole custom sounds"
+    echo "directory, which also holds the node names. Prompts that are already"
+    echo "made with the same voice and settings are not made (or paid for) again."
+    echo
+    if ask_yn "Generate the telemetry prompts now ($EL_TELEM_SCRIPT)?" y; then
+        "$BIN_DIR/$EL_TELEM_SCRIPT" || echo "$EL_TELEM_SCRIPT reported a problem (see above)."
+    else
+        echo "Skipped. Run $EL_TELEM_SCRIPT later, before $EL_NODES_SCRIPT."
+    fi
+
+    # Asked first: both change how many credits speaking the names uses.
+    echo
+    echo "Next, the node name announcements."
+    echo
+    echo "Each announcement can be followed by the node number,"
+    echo "for example \"N 2 D Y I, node 5 0 6 3 1 1\"."
+    ask_yn "Add the node number after each call sign?" n && { args+=(-i); num=1; }
+    echo
+    echo "Call signs can be spelled with letters (\"N 2 D Y I\") or with the"
+    echo "phonetic alphabet (\"November, 2, Delta, Yankee, India\")."
+    ask_yn "Speak call signs phonetically?" n && { args+=(-P); phon=1; }
+
+    read -r nodes said chars <<< "$(astdb_size "$phon" "$num")"
+    rate=$(awk -F'\t' -v m="$EL_MODEL_ID" '$1 == m { print $3; exit }' <<< "${EL_MODEL_LIST:-}")
+    credits=""
+    [[ -n $rate ]] && credits=$(awk -v c="$chars" -v r="$rate" 'BEGIN { printf "%d", c * r + 0.5 }')
+
+    echo
+    echo "The node database has $nodes nodes. Nodes with the same call sign share"
+    if (( num )); then
+        echo "an announcement, but with the node number spoken every node needs its"
+        echo "own: $said announcements."
+    else
+        echo "an announcement, so $said different announcements are needed."
+    fi
+    echo "They can be made in one of two ways:"
+    echo "  1) Joined  Put together from the letter and number sounds of the"
+    echo "             telemetry prompts. Uses no credits, but sounds less natural."
+    echo "  2) Spoken  Each announcement is one ElevenLabs request. Sounds the most"
+    echo "             natural, but uses credits: about $chars characters"
+    echo "             ${credits:+($(el_count "$credits" credit)) }for all $said, then a little more each time"
+    echo "             nodes are added or changed."
+    default=1
+    [[ $EL_NODE_METHOD == speak ]] && default=2
+    ask_number 2 "$default"
+    if (( CHOICE == 2 )); then method=speak; else method=join; fi
+    [[ $method != "$EL_NODE_METHOD" ]] && EL_CHANGED=1
+    EL_NODE_METHOD=$method
+    save_el_config
+    echo "Saved NODE_METHOD=$method in $EL_CONF, for later runs of $EL_NODES_SCRIPT."
+
+    echo
+    if ask_yn "Generate the node name announcements now ($EL_NODES_SCRIPT)?" y; then
+        # Existing announcements are only rebuilt with -r.
+        (( EL_CHANGED || ENGINE_CHANGED )) && args+=(-r)
+        if "$BIN_DIR/$EL_NODES_SCRIPT" "${args[@]}"; then
+            nodes_reminder "$EL_NODES_SCRIPT" "${args[@]}"
+        else
+            echo "$EL_NODES_SCRIPT reported a problem (see above)."
+        fi
+    else
+        echo "Skipped. Run \"$EL_NODES_SCRIPT -a$( (( num )) && echo " -i")$( (( phon )) && echo " -P")\" later to build them."
+    fi
+}
+
+# nodes_reminder SCRIPT ARGS  - after the node names are built with ARGS,
+# explain how to keep them current, and that the installer can be run
+# again.
 nodes_reminder() {
-    local arg cron="0 3 * * * $BIN_DIR/$NODES_SCRIPT -f"
+    local script=$1 arg cron
+    shift
+    cron="0 3 * * * $BIN_DIR/$script -f"
     # -a and -r were for this first full build; keep the voice options.
     for arg in "$@"; do
         [[ $arg == -a || $arg == -r ]] || cron+=" $arg"
     done
     echo
     echo "The node names were built once. Nodes are added and changed all the"
-    echo "time, so run $NODES_SCRIPT regularly to keep them current,"
+    echo "time, so run $script regularly to keep them current,"
     echo "for example every night at 3:00 from root's crontab (sudo crontab -e):"
     echo
     echo "  $cron"
@@ -902,26 +1401,38 @@ nodes_reminder() {
     echo "See \"Keeping node names up to date\" in the README:"
     echo "  https://github.com/$REPO#keeping-node-names-up-to-date"
     echo
-    echo "To change the speaking rate or other settings later, run this installer"
-    echo "again. Steps that are already done are skipped."
+    if [[ $script == "$EL_NODES_SCRIPT" ]] && grep -q '^NODE_METHOD=speak' "$EL_CONF" 2> /dev/null; then
+        echo "Each run speaks only the new and changed nodes, which uses some credits."
+        echo
+    fi
+    echo "To change the speech engine, voice, speaking rate or other settings"
+    echo "later, run: sudo $SETUP_LINK"
+    echo "Steps that are already done are skipped."
 }
 
 # --- Upgrade ---------------------------------------------------------------
 
 upgrade() {
     local old=""
+    if running_installed_copy; then
+        echo "This is the installer kept in $INSTALL_DIR, the same version as"
+        echo "the installed scripts. To upgrade to the latest release, run:"
+        echo "  sudo $UPGRADE_SCRIPT"
+        exit 0
+    fi
     [[ -f $INSTALL_DIR/$TELEM_SCRIPT && -f $INSTALL_DIR/$NODES_SCRIPT ]] \
         || die "No existing install found in $INSTALL_DIR. Run this installer without --upgrade to install."
     [[ -f $VERSION_FILE ]] && old=$(< "$VERSION_FILE")
 
-    echo "DECtalk telemetry upgrade for AllStarLink 3"
+    echo "Telemetry scripts upgrade for AllStarLink 3"
     echo
     echo "Installed version: ${old:-0.12 or older}"
     echo "New version:       $VERSION"
     echo
     echo "This replaces the scripts in $INSTALL_DIR. If you have edited"
-    echo "dec-init.cfg or prompt-list.txt, you will be asked whether to keep"
-    echo "your copy. Your node-overrides.conf is kept."
+    echo "dec-init.cfg, prompt-list.txt or elevenlabs-prompt-list.txt, you will be"
+    echo "asked whether to keep your copy. Your node-overrides.conf, and your"
+    echo "ElevenLabs settings and speech engine choice, are kept."
     echo "Nothing else is changed: no packages, no Asterisk config, and no"
     echo "sounds are generated."
     echo
@@ -929,17 +1440,23 @@ upgrade() {
     echo
     install_files
 
+    ENGINE=$(saved_engine)
+    ENGINE=${ENGINE:-dectalk}
     echo
-    echo "Checking the installation:"
+    echo "Checking the installation (speech engine: $(engine_name "$ENGINE")):"
     if ! run_checks; then
-        echo "Run this installer without --upgrade to set up what is missing."
-        echo "It skips everything that is already done."
+        echo "Run \"sudo $SETUP_LINK\" to set up what is missing. It skips"
+        echo "everything that is already done."
     fi
     echo
     echo "Upgrade to $VERSION done. Existing sounds were not changed."
     echo "Next time, upgrade with: sudo $UPGRADE_SCRIPT"
     echo "To use changes in this version, regenerate them as described in the"
-    echo "README (for example: $NODES_SCRIPT -a -r)."
+    if [[ $ENGINE == elevenlabs ]]; then
+        echo "README (for example: $EL_NODES_SCRIPT -a -r)."
+    else
+        echo "README (for example: $NODES_SCRIPT -a -r)."
+    fi
 }
 
 usage() {
@@ -975,7 +1492,7 @@ is_asl3 || die "AllStarLink 3 (ASL3) is not installed (package 'asl3' not found)
 [[ -f $RPT_CONF ]] || die "$RPT_CONF not found. Nothing was changed."
 
 have_files=1
-for f in "${SCRIPTS[@]}" "${DATA_FILES[@]}" "${USER_FILES[@]}"; do
+for f in "${SCRIPTS[@]}" "${LIB_FILES[@]}" "${DATA_FILES[@]}" "${USER_FILES[@]}"; do
     [[ -n $SRC_DIR && -f $SRC_DIR/$f ]] || have_files=0
 done
 if (( ! have_files )); then
@@ -993,33 +1510,70 @@ if (( ! have_files )); then
     exec bash "$DOWNLOAD_DIR/install.sh" "$@" < /dev/tty
 fi
 
+# The ElevenLabs code, with its settings where the scripts will look.
+EL_CONF=$INSTALL_DIR/elevenlabs.conf
+# shellcheck source=elevenlabs-common.sh
+. "$SRC_DIR/elevenlabs-common.sh"
+
 if [[ $MODE == upgrade ]]; then
     upgrade
     exit 0
 fi
 
-echo "DECtalk telemetry installer for AllStarLink 3, version $VERSION"
+echo "Telemetry installer for AllStarLink 3 (DECtalk or ElevenLabs), version $VERSION"
+echo
+choose_engine
+
+if [[ $ENGINE == elevenlabs ]]; then
+    PLAN=(
+        "Install perl and curl if they are missing"
+        "Turn on automatic updates of the node database ($ASTDB)"
+        "Copy the scripts to $INSTALL_DIR and put them on the PATH"
+        "Enter your ElevenLabs API key"
+        "Choose the ElevenLabs model"
+        "Choose a voice and its speed, with an optional preview on your node"
+        "Allow custom sounds in $ASTERISK_CONF"
+        "Point node names in $RPT_CONF at $NODENAMES_DIR"
+        "Check that everything is installed"
+        "Offer to generate the telemetry and node name sounds"
+    )
+else
+    PLAN=(
+        "Install DECtalk if it is not already working"
+        "Install ffmpeg and perl if they are missing"
+        "Turn on automatic updates of the node database ($ASTDB)"
+        "Copy the scripts to $INSTALL_DIR and put them on the PATH"
+        "Choose the speaking rate, with an optional preview on your node"
+        "Allow custom sounds in $ASTERISK_CONF"
+        "Point node names in $RPT_CONF at $NODENAMES_DIR"
+        "Check that everything is installed"
+        "Offer to generate the telemetry and node name sounds"
+    )
+fi
 echo
 echo "This will:"
-echo "  1. Install DECtalk if it is not already working"
-echo "  2. Install ffmpeg and perl if they are missing"
-echo "  3. Turn on automatic updates of the node database ($ASTDB)"
-echo "  4. Copy the scripts to $INSTALL_DIR and put them on the PATH"
-echo "  5. Choose the speaking rate, with an optional preview on your node"
-echo "  6. Allow custom sounds in $ASTERISK_CONF"
-echo "  7. Point node names in $RPT_CONF at $NODENAMES_DIR"
-echo "  8. Check that everything is installed"
-echo "  9. Offer to generate the telemetry and node name sounds"
+for i in "${!PLAN[@]}"; do
+    printf '  %d. %s\n' $((i + 1)) "${PLAN[$i]}"
+done
 echo
 echo "You will be asked before each change. Config files are backed up first."
 echo
 ask_yn "Start the installation?" y || { echo "Nothing was changed."; exit 0; }
 
-step_dectalk
-step_packages
-step_node_database
-step_scripts
-step_speaking_rate
+if [[ $ENGINE == elevenlabs ]]; then
+    step_packages
+    step_node_database
+    step_scripts
+    step_el_key
+    step_el_model
+    step_el_voice
+else
+    step_dectalk
+    step_packages
+    step_node_database
+    step_scripts
+    step_speaking_rate
+fi
 step_asterisk_conf
 step_rpt_conf
 step_verify && step_generate
@@ -1036,6 +1590,11 @@ if (( ASTERISK_RESTART_NEEDED )); then
 fi
 
 echo
-echo "Done. Run \"$TELEM_SCRIPT\" or \"$NODES_SCRIPT -h\" from anywhere."
-echo "To speak your own text on the node, run \"$SPEAK_SCRIPT -h\" for how."
+if [[ $ENGINE == elevenlabs ]]; then
+    echo "Done. Run \"$EL_TELEM_SCRIPT\" or \"$EL_NODES_SCRIPT -h\" from anywhere."
+    echo "To speak your own text on the node, run \"$EL_SPEAK_SCRIPT -h\" for how."
+else
+    echo "Done. Run \"$TELEM_SCRIPT\" or \"$NODES_SCRIPT -h\" from anywhere."
+    echo "To speak your own text on the node, run \"$SPEAK_SCRIPT -h\" for how."
+fi
 echo "To upgrade to a newer release later, run \"sudo $UPGRADE_SCRIPT\"."

@@ -142,7 +142,7 @@ saved_node() {
 }
 
 save_node() {
-    printf '# Default node for dectalk-speak.sh. Change it with: dectalk-speak.sh -s\n%s\n' "$NODE" \
+    printf '# Default node for dectalk-speak.sh and elevenlabs-speak.sh. Change it with -s.\n%s\n' "$NODE" \
         > "$NODE_FILE" || die "Could not save the default node in $NODE_FILE"
     echo "Saved node $NODE as the default in $NODE_FILE." >&2
 }

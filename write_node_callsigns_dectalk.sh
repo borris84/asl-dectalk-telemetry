@@ -44,6 +44,17 @@
 #   - "mode" entries (-m) turn -P and -i on or off for one node or call
 #     sign, without changing what is said
 #   - -a / -n / -i / -P / -o / -t / -m / -x / -l / -c / -v / -j / -r / -s / -p
+#
+# ElevenLabs: run as write_node_callsigns_elevenlabs.sh (which sets
+# ASL_TELEM_ENGINE=elevenlabs and runs this script), the announcements are
+# made with the voice in elevenlabs.conf instead, in one of two ways:
+#   - speak (-S): each announcement is one ElevenLabs request. It sounds
+#     the most natural, but every node costs credits.
+#   - join (-J): each announcement is joined from the letter, digit and
+#     phonetic alphabet sounds made by elevenlabs-telemetry.sh, with short
+#     gaps between them. Costs nothing, but sounds less natural. Custom
+#     text (-t) is still spoken by ElevenLabs.
+# The default is NODE_METHOD in elevenlabs.conf.
 
 set -euo pipefail
 
@@ -54,6 +65,13 @@ export LC_ALL=C
 SRCDIR=""
 DESTDIR="/usr/share/asterisk/sounds/custom/rpt/nodenames"
 SAY="/usr/local/bin/say"
+ENGINE=${ASL_TELEM_ENGINE:-dectalk}
+SOUNDS_DIR="/usr/share/asterisk/sounds/custom"
+# Gaps between joined sounds (-J), in 8 kHz u-law bytes: between letters,
+# and at a comma or period.
+GAP_SHORT_BYTES=640
+GAP_LONG_BYTES=2400
+JOIN=""
 # readlink -f: find the config files beside the real script, not a PATH symlink
 SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 INIT_CFG="$SCRIPT_DIR/dec-init.cfg"
@@ -61,9 +79,12 @@ OVERRIDES_FILE="$SCRIPT_DIR/node-overrides.conf"
 PREV_OVERRIDES=""
 DECTALK_INIT=""
 PREV_DB=""
-JOBS="$(nproc 2>/dev/null || echo 4)"
+JOBS=""
 MAX_PREVIEW=10
 PROGRESS_EVERY=1000
+# Speaking each announcement with ElevenLabs takes far longer per node, so
+# the progress on a terminal is updated this often instead.
+PROGRESS_EVERY_SPEAK=100
 
 VERBOSE=0
 INCNODE=0
@@ -86,9 +107,21 @@ OVERRIDES_SAME=0
 EDIT_OPS=() EDIT_KEYS=() EDIT_TEXTS=()
 REMOVE_NODES=()
 
+if [[ $ENGINE == elevenlabs ]]; then
+    NAME=write_node_callsigns_elevenlabs.sh
+else
+    NAME=write_node_callsigns_dectalk.sh
+fi
+
 usage() {
+    local text_note="DECtalk [:commands] and [phonemes] are allowed."
+    local jobs_note="nproc"
+    if [[ $ENGINE == elevenlabs ]]; then
+        text_note="It is always spoken by ElevenLabs, even with -J."
+        jobs_note="nproc with -J; JOBS in elevenlabs.conf, or 2, with -S"
+    fi
     cat << EOF
-Usage: write_node_callsigns.sh [options]
+Usage: $NAME [options]
 
 OPTIONS:
    -h          Show this message
@@ -97,7 +130,7 @@ OPTIONS:
    -P          Speak call signs phonetically: November, echo, 2, Delta...
    -n NODE     Process a single node
    -d PATH     Destination directory (default: $DESTDIR)
-   -j N        Parallel jobs (default: nproc)
+   -j N        Parallel jobs (default: $jobs_note)
    -v          Verbose output
    -f          Skip confirmation prompt
    -r          Force regenerate even when output already exists
@@ -110,7 +143,7 @@ OPTIONS:
                wins over a callsign override. Repeatable.
    -t NODE=TEXT
                Save custom text for NODE, spoken as-is with no call sign
-               spelling. DECtalk [:commands] and [phonemes] are allowed.
+               spelling. $text_note
                Wins over -o. Repeatable.
    -m KEY=WORDS
                Save a mode for KEY (a node number or a callsign) that sets
@@ -122,11 +155,28 @@ OPTIONS:
                number or a callsign). Repeatable.
    -l          List the saved overrides and exit (after any -o/-t/-m/-x).
    -c PATH     Overrides file (default: $OVERRIDES_FILE)
+EOF
+    if [[ $ENGINE == elevenlabs ]]; then
+        cat << EOF
+   -S          Speak each announcement with one ElevenLabs request: most
+               natural, but every node costs credits
+   -J          Join each announcement from the letter, digit and phonetic
+               sounds made by elevenlabs-telemetry.sh: free, less natural.
+               Without -S or -J, NODE_METHOD in elevenlabs.conf is used.
+
+Output files are raw headerless u-law (.ulaw), made with the ElevenLabs
+voice in elevenlabs.conf.
+EOF
+    else
+        cat << EOF
 
 Output files are raw headerless u-law (.ulaw), spoken by DECtalk.
--i and -P only affect nodes that are (re)built: after turning either on or
-off, rebuild everything with -a -r.
 If dec-init.cfg exists beside this script, it is prepended to the spoken text.
+EOF
+    fi
+    cat << EOF
+-i and -P only affect nodes that are (re)built: after turning either on or
+off, or changing the voice, rebuild everything with -a -r.
 Overrides are saved in the overrides file and applied on every run; the file
 can also be edited by hand. Only nodes whose override was added, changed or
 removed since the last run are rebuilt. Nodes with a node-number override
@@ -134,14 +184,14 @@ are built even when they are not in astdb.txt (private nodes); when such an
 override is removed, the node's announcement is deleted.
 
 Examples:
-    ./write_node_callsigns.sh -a -f       # First full build, no prompt
-    ./write_node_callsigns.sh -f          # Only new/changed nodes
-    ./write_node_callsigns.sh -n 40000 -r # Rebuild one node
-    ./write_node_callsigns.sh -f -o "506311=N2DYI hub" -o "N2DYI=N2DYI repeater"
-    ./write_node_callsigns.sh -f -t "1999=the lab node"
-    ./write_node_callsigns.sh -f -m "506311=phonetic" -m "506312=letters number"
-    ./write_node_callsigns.sh -f -x 506311 # Remove an override
-    ./write_node_callsigns.sh -l          # List saved overrides
+    $NAME -a -f       # First full build, no prompt
+    $NAME -f          # Only new/changed nodes
+    $NAME -n 40000 -r # Rebuild one node
+    $NAME -f -o "506311=N2DYI hub" -o "N2DYI=N2DYI repeater"
+    $NAME -f -t "1999=the lab node"
+    $NAME -f -m "506311=phonetic" -m "506312=letters number"
+    $NAME -f -x 506311 # Remove an override
+    $NAME -l          # List saved overrides
 EOF
 }
 
@@ -171,16 +221,16 @@ ensure_directory_exists() {
 
 # Spell "$1" one character at a time into SPELLED: N2DYI -> n 2 D Y I
 #
-# E, N, S and W are sent in lower case. DECtalk reads an upper case E/N/S/W
-# that follows a number as a compass point ("W 6 E K" is spoken as
-# "W 6 East K"). In lower case it says the letter name, and the audio is
-# otherwise identical to the upper case letter.
+# For DECtalk, E, N, S and W are sent in lower case. DECtalk reads an
+# upper case E/N/S/W that follows a number as a compass point ("W 6 E K" is
+# spoken as "W 6 East K"). In lower case it says the letter name, and the
+# audio is otherwise identical to the upper case letter.
 spell_out() {
     local word=${1^^} i char
     SPELLED=""
     for (( i = 0; i < ${#word}; i++ )); do
         char=${word:i:1}
-        [[ $char == [ENSW] ]] && char=${char,,}
+        [[ $ENGINE == dectalk && $char == [ENSW] ]] && char=${char,,}
         SPELLED+="$char "
     done
     SPELLED=${SPELLED% }
@@ -189,9 +239,9 @@ spell_out() {
 # Append the phonetic alphabet words for each character of "$1" to the
 # PHONETIC_ITEMS array: N2DYI -> November echo... Digits stay digits.
 #
-# Papa and Delta are written as phonemes. DECtalk says "papa" as "poppa",
-# and softens the t in "delta" to "delda"; starting the t's syllable as a
-# separate word keeps it a full t.
+# For DECtalk, Papa and Delta are written as phonemes. DECtalk says "papa"
+# as "poppa", and softens the t in "delta" to "delda"; starting the t's
+# syllable as a separate word keeps it a full t.
 phonetic_items() {
     local word=${1^^} i
     for (( i = 0; i < ${#word}; i++ )); do
@@ -199,7 +249,7 @@ phonetic_items() {
             A) PHONETIC_ITEMS+=(Alfa) ;;
             B) PHONETIC_ITEMS+=(Bravo) ;;
             C) PHONETIC_ITEMS+=(Charlie) ;;
-            D) PHONETIC_ITEMS+=("[d'ehl tah]") ;;
+            D) if [[ $ENGINE == dectalk ]]; then PHONETIC_ITEMS+=("[d'ehl tah]"); else PHONETIC_ITEMS+=(Delta); fi ;;
             E) PHONETIC_ITEMS+=(Echo) ;;
             F) PHONETIC_ITEMS+=(Foxtrot) ;;
             G) PHONETIC_ITEMS+=(Golf) ;;
@@ -211,7 +261,7 @@ phonetic_items() {
             M) PHONETIC_ITEMS+=(Mike) ;;
             N) PHONETIC_ITEMS+=(November) ;;
             O) PHONETIC_ITEMS+=(Oscar) ;;
-            P) PHONETIC_ITEMS+=("[paap'aa]") ;;
+            P) if [[ $ENGINE == dectalk ]]; then PHONETIC_ITEMS+=("[paap'aa]"); else PHONETIC_ITEMS+=(Papa); fi ;;
             Q) PHONETIC_ITEMS+=(Quebec) ;;
             R) PHONETIC_ITEMS+=(Romeo) ;;
             S) PHONETIC_ITEMS+=(Sierra) ;;
@@ -240,15 +290,18 @@ is_callsign() {
 
 # Convert an astdb callsign field into the text sent to DECtalk, written
 # into SPEECH_TEXT (no command substitution, so no subshell per node).
-#   - runs of letters/digits that are call signs are spelled out
+#   - runs of letters/digits that are call signs are spelled out (for
+#     ElevenLabs they are sent as one upper case word, N2DYI, which it
+#     spells more reliably)
 #   - a lone "/" or "-" joined to a call sign (KA4EPS/R, VA2RXP-25) is
 #     spoken as "slash" / "dash"
-#   - a call sign's final I is sent as [']I (stressed) so it rises
-#   - a VA/VE prefix gets a glottal stop after the V (V [q] e 3 R W J)
+#   - DECtalk only: a call sign's final I is sent as [']I (stressed) so it
+#     rises, and a VA/VE prefix gets a glottal stop after the V
+#     (V [q] e 3 R W J)
 #   - with PHONETIC=1, call signs use the phonetic alphabet instead, one
-#     item per comma (a pause) and a period after the last (falling
-#     pitch). A short suffix joined by "/" or "-" (KA4EPS/R, VA2RXP-25)
-#     is part of the call sign: "... Romeo, X-ray, Papa, dash, 25." A
+#     item per comma (a pause; ElevenLabs gets no commas) and a period
+#     after the last (falling pitch). A short suffix joined by "/" or "-"
+#     (KA4EPS/R, VA2RXP-25) is part of the call sign: "... Romeo, X-ray, Papa, dash, 25." A
 #     repeater's "/R" is not spelled phonetically: "... Sierra, slash R."
 #   - asterisks are dropped
 #   - everything else is passed through untouched
@@ -258,8 +311,9 @@ callsign_to_speech() {
     local i n tok item text="" SPELLED=""
     local -a PHONETIC_ITEMS
 
-    # Square brackets are DECtalk's command/phoneme delimiters. astdb is
-    # user-supplied data, so never let it issue DECtalk commands.
+    # Square brackets are DECtalk's command/phoneme delimiters (and
+    # ElevenLabs' audio tags). astdb is user-supplied data, so never let it
+    # issue commands.
     rest=${rest//[\[\]]/ }
 
     # Asterisks ("*FIRESIDE*") are decoration; DECtalk would say "asterisk".
@@ -299,16 +353,29 @@ callsign_to_speech() {
                         fi
                         (( i += 2 ))
                     fi
+                    # DECtalk pauses at each comma. ElevenLabs reads the
+                    # words better as one phrase, without them.
                     text+=" ${PHONETIC_ITEMS[0]}"
-                    for item in "${PHONETIC_ITEMS[@]:1}"; do text+=", $item"; done
+                    for item in "${PHONETIC_ITEMS[@]:1}"; do
+                        if [[ $ENGINE == dectalk ]]; then text+=", $item"; else text+=" $item"; fi
+                    done
                     text+=". "
                     continue
                 fi
+                if [[ $ENGINE == elevenlabs ]]; then
+                    # ElevenLabs says a call sign best as one upper case
+                    # word: spaced-out single letters are read unreliably
+                    # ("y" as "yeah", "b" as "buh").
+                    text+=" ${tokens[i]^^} "
+                    continue
+                fi
                 spell_out "${tokens[i]}"
-                # A final I falls flat; a leading stress mark makes it rise.
-                [[ $SPELLED == *" I" ]] && SPELLED="${SPELLED% I} [']I"
-                # VA/VE prefixes run together; a glottal stop separates them.
-                [[ $SPELLED == "V "[Ae]" "* ]] && SPELLED="V [q] ${SPELLED#V }"
+                if [[ $ENGINE == dectalk ]]; then
+                    # A final I falls flat; a leading stress mark makes it rise.
+                    [[ $SPELLED == *" I" ]] && SPELLED="${SPELLED% I} [']I"
+                    # VA/VE prefixes run together; a glottal stop separates them.
+                    [[ $SPELLED == "V "[Ae]" "* ]] && SPELLED="V [q] ${SPELLED#V }"
+                fi
                 text+=" $SPELLED "
                 ;;
             s)
@@ -350,6 +417,15 @@ process_one_node() {
     local SPEECH_TEXT="" SPELLED=""
     local text n link
 
+    # ElevenLabs refused for the whole account (no credits, bad key): the
+    # rest would fail too, so don't send them.
+    if [[ -n ${STOP_FILE:-} && -e $STOP_FILE ]]; then
+        for n in "${nodes[@]}"; do
+            printf 'FAIL -\n'  # counted, not shown
+        done
+        return 1
+    fi
+
     if [[ $mode == t ]]; then
         # Custom text comes from the overrides file, not astdb, so it is
         # trusted and may carry DECtalk commands.
@@ -371,20 +447,21 @@ process_one_node() {
         if [[ $text == *. ]]; then text+=" Node $SPELLED"; else text+=", node $SPELLED"; fi
     fi
 
-    # [:phoneme on] makes DECtalk treat ['] as a stress mark rather than
-    # reading it aloud, whether or not dec-init.cfg turns it on.
-    # DECtalk writes 8 kHz u-law straight to stdout. Leading/trailing bytes
-    # quieter than about -50 dB (u-law codes 0x73-0x7f / 0xf3-0xff) are
-    # trimmed as silence. Write to a temp file first so a crash/kill mid-run
-    # never leaves a corrupt/partial node file in place.
-    "$SAY" -e 3 -fo stdout:raw -a "$DECTALK_INIT [:phoneme on] $text" < /dev/null 2> /dev/null \
-        | perl -0777 -pe 's/^[\x73-\x7f\xf3-\xff]+//; s/[\x73-\x7f\xf3-\xff]+$//' > "$tmp"
-    if [[ "${PIPESTATUS[*]}" == "0 0" && -s "$tmp" ]]; then
+    # Joined announcements are written by join_writer, one process for the
+    # whole run, which is far quicker than starting cat for each one.
+    if [[ $ENGINE == elevenlabs && $JOIN == 1 && $mode != t ]]; then
+        printf 'JOIN\t%s\t%s\t%s\n' "$1" "${callsign//$'\t'/ }" "$text"
+        return 0
+    fi
+
+    # Write to a temp file first so a crash/kill mid-run never leaves a
+    # corrupt/partial node file in place.
+    if render_announcement "$mode" "$text" "$tmp"; then
         mv -f "$tmp" "$out"
     else
         rm -f "$tmp"
         for n in "${nodes[@]}"; do
-            printf 'FAIL DECtalk failed for node %s (%s)\n' "$n" "$callsign"
+            printf 'FAIL %s for node %s (%s)\n' "$RENDER_ERROR" "$n" "$callsign"
         done
         return 1
     fi
@@ -404,7 +481,137 @@ process_one_node() {
     done
 }
 
-export -f process_one_node callsign_to_speech is_callsign spell_out phonetic_items
+# render_announcement MODE TEXT OUT  - write TEXT spoken by the engine to
+# OUT as 8 kHz u-law. (Joined announcements are made by join_writer.) On
+# failure RENDER_ERROR says why.
+render_announcement() {
+    local mode=$1 text=$2 out=$3
+    RENDER_ERROR=""
+    if [[ $ENGINE == elevenlabs ]]; then
+        el_render "$text" "$out" && return 0
+        RENDER_ERROR="ElevenLabs failed ($EL_ERROR)"
+        [[ $EL_ERROR == *"out of credits"* || $EL_ERROR == *"key was not accepted"* ]] \
+            && [[ -n ${STOP_FILE:-} ]] && : > "$STOP_FILE"
+        return 1
+    fi
+    # [:phoneme on] makes DECtalk treat ['] as a stress mark rather than
+    # reading it aloud, whether or not dec-init.cfg turns it on.
+    # DECtalk writes 8 kHz u-law straight to stdout. Leading/trailing bytes
+    # quieter than about -50 dB (u-law codes 0x73-0x7f / 0xf3-0xff) are
+    # trimmed as silence.
+    "$SAY" -e 3 -fo stdout:raw -a "$DECTALK_INIT [:phoneme on] $text" < /dev/null 2> /dev/null \
+        | perl -0777 -pe 's/^[\x73-\x7f\xf3-\xff]+//; s/[\x73-\x7f\xf3-\xff]+$//' > "$out"
+    [[ "${PIPESTATUS[*]}" == "0 0" && -s "$out" ]] && return 0
+    RENDER_ERROR="DECtalk failed"
+    return 1
+}
+
+# join_writer  - pass the workers' status lines through, and make the
+# announcement for each "JOIN<TAB>nodes<TAB>callsign<TAB>text" line, printing
+# an OK or FAIL line per node for report_progress.
+#
+# TEXT (as made by callsign_to_speech) is built from the telemetry sounds in
+# SOUNDS_DIR: a single letter or digit, a phonetic alphabet word, "slash",
+# "dash" and "node" each have their own sound, and any other word is
+# spelled out a character at a time. A short gap goes between sounds, and
+# a longer one at a comma or period. Each sound is read once and kept in
+# memory. As in process_one_node, the first node's file is written under a
+# temp name and renamed, and the other nodes' files are hard links to it.
+join_writer() {
+    perl -e '
+        use strict; use warnings;
+        my ($dest, $snd, $gap_short, $gap_long) = @ARGV;
+        my ($short, $long) = ("\xff" x $gap_short, "\xff" x $gap_long);
+        my %phon = (ALFA => "a", BRAVO => "b", CHARLIE => "c", DELTA => "d",
+            ECHO => "e", FOXTROT => "f", GOLF => "g", HOTEL => "h", INDIA => "i",
+            JULIETT => "j", KILO => "k", LIMA => "l", MIKE => "m", NOVEMBER => "n",
+            OSCAR => "o", PAPA => "p", QUEBEC => "q", ROMEO => "r", SIERRA => "s",
+            TANGO => "t", UNIFORM => "u", VICTOR => "v", WHISKEY => "w",
+            "X-RAY" => "x", YANKEE => "y", ZULU => "z");
+        my %word = (SLASH => "letters/slash", DASH => "letters/dash", NODE => "rpt/node");
+        my %cache;
+        sub sound {
+            my $f = "$snd/$_[0].ul";
+            return $cache{$f} if exists $cache{$f};
+            open(my $h, "<:raw", $f) or return $cache{$f} = undef;
+            local $/;
+            my $d = <$h>;
+            return $cache{$f} = $d;
+        }
+        $| = 1;
+        while (my $line = <STDIN>) {
+            if ($line !~ /^JOIN\t/) { print $line; next }
+            chomp $line;
+            my (undef, $list, $call, $text) = split /\t/, $line, 4;
+            my @nodes = split /,/, $list;
+            my (@parts, @kind, $err);
+            my $add = sub {
+                my $d = sound($_[0]);
+                if (!defined $d) { $err //= "Missing $snd/$_[0].ul (run elevenlabs-telemetry.sh first)"; return }
+                if (@parts && $kind[-1] ne "pause") { push @parts, $short; push @kind, "gap" }
+                push @parts, $d; push @kind, "sound";
+            };
+            my $pause = sub {
+                if (@parts && $kind[-1] ne "pause") { push @parts, $long; push @kind, "pause" }
+            };
+            (my $t = $text) =~ s/([,.])/ $1 /g;
+            # Phonetic call signs come without commas; each word next to a
+            # phonetic alphabet word gets the pause a comma would give.
+            my $last_phon = 0;
+            for my $w (split " ", $t) {
+                my $u = uc $w;
+                my $is_phon = exists $phon{$u};
+                $pause->() if $is_phon || ($last_phon && $u ne "," && $u ne ".");
+                $last_phon = $is_phon;
+                if ($u eq "," || $u eq ".") {
+                    $pause->();
+                } elsif (exists $word{$u}) {
+                    $add->($word{$u});
+                } elsif ($is_phon) {
+                    $add->("phonetic/$phon{$u}_p");
+                } else {
+                    for my $c (split //, $u) {
+                        if ($c =~ /[A-Z]/) { $add->("letters/" . lc $c) }
+                        elsif ($c =~ /[0-9]/) { $add->("digits/$c") }
+                        elsif ($c eq "/") { $add->("letters/slash") }
+                        elsif ($c eq "-") { $add->("letters/dash") }
+                        # Other characters have a sound only if the prompt
+                        # list made one (letters/ascii<code>).
+                        elsif (-f "$snd/letters/ascii" . ord($c) . ".ul") { $add->("letters/ascii" . ord($c)) }
+                    }
+                }
+            }
+            if (@kind && $kind[-1] eq "pause") { pop @parts; pop @kind }
+            $err //= "Nothing to join" unless @parts;
+            if ($err) { print "FAIL $err for node $_ ($call)\n" for @nodes; next }
+
+            my $out = "$dest/$nodes[0].ulaw";
+            my $tmp = "$out.tmp.$$";
+            my $ok = open(my $h, ">:raw", $tmp);
+            $ok &&= print $h @parts;
+            $ok &&= close $h;
+            $ok &&= rename $tmp, $out;
+            if (!$ok) {
+                unlink $tmp;
+                print "FAIL Could not write $out for node $_ ($call)\n" for @nodes;
+                next;
+            }
+            print "OK $nodes[0] $call -> $text\n";
+            for my $n (@nodes[1 .. $#nodes]) {
+                my $link = "$dest/$n.ulaw";
+                if (link($out, "$link.tmp.$$") && rename("$link.tmp.$$", $link)) {
+                    print "OK $n $call -> $text (shared with $nodes[0])\n";
+                } else {
+                    unlink "$link.tmp.$$";
+                    print "FAIL Could not link node $n to $out\n";
+                }
+            }
+        }
+    ' -- "$DESTDIR" "$SOUNDS_DIR" "$GAP_SHORT_BYTES" "$GAP_LONG_BYTES"
+}
+
+export -f process_one_node callsign_to_speech is_callsign spell_out phonetic_items \
+    render_announcement
 
 load_previous_database() {
     PREV_CALLSIGNS=()
@@ -543,11 +750,12 @@ queue_node() {
         resolve_node "$node" "$callsign" || true
     fi
     [[ -n $SPEAK_WORDS ]] && note+=" (mode: $SPEAK_WORDS)"
-    printf '%s|%s|%s|%s|%s\n' "$node" "$SPEAK_MODE" "$SPEAK_VALUE" "$SPEAK_PHON" "$SPEAK_NUM" >> "$WORK_FILE"
+    # File descriptors 3 and 4 are WORK_FILE and CHANGES_FILE.
+    printf '%s|%s|%s|%s|%s\n' "$node" "$SPEAK_MODE" "$SPEAK_VALUE" "$SPEAK_PHON" "$SPEAK_NUM" >&3
     if [[ -z "$old" ]]; then
-        printf '%s: NEW -> %s%s\n' "$node" "$SPEAK_VALUE" "$note" >> "$CHANGES_FILE"
+        printf '%s: NEW -> %s%s\n' "$node" "$SPEAK_VALUE" "$note" >&4
     else
-        printf '%s: %s -> %s%s\n' "$node" "$old" "$SPEAK_VALUE" "$note" >> "$CHANGES_FILE"
+        printf '%s: %s -> %s%s\n' "$node" "$old" "$SPEAK_VALUE" "$note" >&4
     fi
 }
 
@@ -690,9 +898,33 @@ save_override_snapshot() {
     vlog "Updated previous overrides: $PREV_OVERRIDES"
 }
 
+# Print an estimate of the characters ElevenLabs will be sent for the
+# work in GROUP_FILE (a call sign is sent as it is, but phonetic words are
+# about 5.5 times as long).
+estimate_characters() {
+    awk -F'|' -v join="${JOIN:-0}" '
+        $2 == "t" { n += length($3); next }
+        join == 1 { next }
+        { n += ($4 == 1 ? 5.5 : 1.1) * length($3) }
+        $5 == 1 { n += 7 + 2 * length($1) }
+        END { printf "%d\n", n }
+    ' "$GROUP_FILE"
+}
+
 confirm_processing() {
     local node_count=$1
-    local remove_count=$2
+    local remove_count=$2 chars
+    if [[ $ENGINE == elevenlabs ]] && (( node_count )); then
+        group_work
+        chars=$(estimate_characters)
+        if (( chars > 0 )); then
+            log "Asking ElevenLabs what this will cost..."
+            log "ElevenLabs will be sent $(el_count "$(wc -l < "$GROUP_FILE" | tr -d ' ')" request)."
+            el_cost_report "$chars"
+        elif (( JOIN )); then
+            log "The announcements are joined from the telemetry sounds: no ElevenLabs credits are used."
+        fi
+    fi
     (( FORCE_RUN )) && return 0
 
     log "$node_count nodes need to be processed (jobs=$JOBS)."
@@ -713,14 +945,15 @@ confirm_processing() {
 }
 
 # Read one status line per finished node from the workers and show a
-# running count and percentage every PROGRESS_EVERY nodes.
+# running count and percentage every PROGRESS_EVERY nodes (every
+# PROGRESS_EVERY_SPEAK when speaking with ElevenLabs on a terminal).
 #
 # On a terminal the progress line is redrawn in place (carriage return +
 # erase-to-end-of-line) so past updates don't pile up. When output is not a
 # terminal (cron, a log file, a pipe), each update is a normal line.
 report_progress() {
     local total=$1
-    local done_count=0 failed=0 line msg
+    local done_count=0 failed=0 skipped=0 line msg
     local inplace=0 shown=0
 
     [[ -t 1 ]] && inplace=1
@@ -731,7 +964,10 @@ report_progress() {
         # Failures (and per-node lines with -v) are ordinary lines: erase
         # the in-place progress line first so they don't run into it.
         msg=""
-        if [[ "$line" == FAIL* ]]; then
+        if [[ "$line" == "FAIL -" ]]; then
+            failed=$((failed + 1))
+            skipped=$((skipped + 1))
+        elif [[ "$line" == FAIL* ]]; then
             failed=$((failed + 1))
             msg="${line#FAIL }"
         elif (( VERBOSE )); then
@@ -756,6 +992,8 @@ report_progress() {
     if (( shown )); then printf '\r\033[K'; fi
     if (( failed )); then
         log "Processed $done_count of $total nodes, $failed failed."
+        (( skipped )) && log "$skipped of them were not sent, because ElevenLabs stopped accepting requests (see above)."
+        log "To retry them, run again with -a: announcements that already exist are skipped."
     else
         log "Processed $done_count of $total nodes (100%)."
     fi
@@ -781,7 +1019,7 @@ group_work() {
 run_parallel() {
     local total groups
     total="$(wc -l < "$WORK_FILE" | tr -d ' ')"
-    group_work
+    [[ -s $GROUP_FILE ]] || group_work
     groups="$(wc -l < "$GROUP_FILE" | tr -d ' ')"
     (( groups < total )) \
         && log "$total nodes say $groups different things: rendering $groups announcements, the rest are shared."
@@ -803,7 +1041,8 @@ run_parallel() {
                     shift 5
                 done
               ' _
-    fi | report_progress "$total"
+    fi | if [[ $ENGINE == elevenlabs && $JOIN == 1 ]]; then join_writer; else cat; fi \
+       | report_progress "$total"
 }
 
 update_previous_db() {
@@ -826,7 +1065,7 @@ format_total_time() {
 }
 
 # --- options ---
-while getopts "haiPj:n:d:s:p:o:t:m:x:c:lfvr" OPTION; do
+while getopts "haiPj:n:d:s:p:o:t:m:x:c:lfvrSJ" OPTION; do
     case "$OPTION" in
         o)
             parse_override o "$OPTARG"
@@ -864,11 +1103,15 @@ while getopts "haiPj:n:d:s:p:o:t:m:x:c:lfvr" OPTION; do
         f) FORCE_RUN=1 ;;
         v) VERBOSE=1 ;;
         r) FORCE_REBUILD=1 ;;
+        S|J)
+            [[ $ENGINE == elevenlabs ]] || die "-$OPTION is only for write_node_callsigns_elevenlabs.sh"
+            if [[ $OPTION == J ]]; then JOIN=1; else JOIN=0; fi
+            ;;
         *) usage; exit 1 ;;
     esac
 done
 
-[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "-j must be a positive integer"
+[[ -z "$JOBS" || "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "-j must be a positive integer"
 
 start_time="$(date +%s%3N)"
 
@@ -900,24 +1143,63 @@ if [[ -f $PREV_OVERRIDES && $(print_overrides) == "$(< "$PREV_OVERRIDES")" ]]; t
     OVERRIDES_SAME=1
 fi
 
-[[ -x "$SAY" ]] || die "DECtalk say command not found at $SAY"
 command -v perl >/dev/null 2>&1 || die "perl is required to trim silence"
-
-if [[ -f "$INIT_CFG" ]]; then
-    DECTALK_INIT="$(tr '\r\n' '  ' < "$INIT_CFG")"
-    vlog "Using DECtalk init from $INIT_CFG"
+if [[ $ENGINE == elevenlabs ]]; then
+    [[ -r "$SCRIPT_DIR/elevenlabs-common.sh" ]] || die "$SCRIPT_DIR/elevenlabs-common.sh not found"
+    # shellcheck source=elevenlabs-common.sh
+    . "$SCRIPT_DIR/elevenlabs-common.sh"
+    # Joining needs no settings; anything spoken does.
+    if ! el_load_config; then
+        el_defaults
+        [[ $JOIN == 1 ]] || die "$EL_CONF not found. Run "sudo asl-telem-setup.sh" (or install.sh) and choose ElevenLabs to set it up."
+    fi
+    [[ -n $JOIN ]] || { [[ $EL_NODE_METHOD == join ]] && JOIN=1 || JOIN=0; }
+    if (( JOIN )); then
+        for f in letters/a digits/0 phonetic/a_p rpt/node; do
+            [[ -f $SOUNDS_DIR/$f.ul ]] \
+                || die "$SOUNDS_DIR/$f.ul not found. -J joins the telemetry sounds: run elevenlabs-telemetry.sh first."
+        done
+    fi
+    # -t text is spoken by ElevenLabs even when joining.
+    if (( ! JOIN )) || (( ${#CUSTOM_TEXT[@]} )); then
+        el_configured || die "$EL_CONF has no API_KEY or VOICE_ID. Run "sudo asl-telem-setup.sh" to set them."
+        command -v curl >/dev/null 2>&1 || die "curl is required to reach ElevenLabs"
+    fi
+    if [[ -z $JOBS ]]; then
+        if (( JOIN )); then JOBS="$(nproc 2>/dev/null || echo 4)"; else JOBS=$EL_JOBS; fi
+    fi
+    # On a terminal the progress line is redrawn in place, so frequent
+    # updates cost nothing; in a log (cron) they would be thousands of lines.
+    (( ! JOIN )) && [[ -t 1 ]] && PROGRESS_EVERY=$PROGRESS_EVERY_SPEAK
+    vlog "Using ElevenLabs voice ${EL_VOICE_NAME:-$EL_VOICE_ID} ($( (( JOIN )) && echo "joined sounds" || echo "one request per announcement"))"
+else
+    [[ -x "$SAY" ]] || die "DECtalk say command not found at $SAY"
+    if [[ -f "$INIT_CFG" ]]; then
+        DECTALK_INIT="$(tr '\r\n' '  ' < "$INIT_CFG")"
+        vlog "Using DECtalk init from $INIT_CFG"
+    fi
+    [[ -n $JOBS ]] || JOBS="$(nproc 2>/dev/null || echo 4)"
 fi
 
 ensure_directory_exists "$DESTDIR"
-export SAY DECTALK_INIT INCNODE PHONETIC DESTDIR VERBOSE
+export SAY DECTALK_INIT INCNODE PHONETIC DESTDIR VERBOSE ENGINE JOIN SOUNDS_DIR
 
+# Reading and checking tens of thousands of nodes takes a while on a slow
+# system (about a minute on a Raspberry Pi 4), so say what is going on.
+[[ -z "$SINGLE_NODE" ]] && log "Reading the node database ($SRCDIR/astdb.txt)..."
 load_previous_database
 
 WORK_FILE="$(mktemp)"
 CHANGES_FILE="$(mktemp)"
 GROUP_FILE="$(mktemp)"
-cleanup() { rm -f "$WORK_FILE" "$CHANGES_FILE" "$GROUP_FILE"; }
+ENTRIES_FILE="$(mktemp)"
+STOP_FILE="$(mktemp -u)"
+cleanup() { rm -f "$WORK_FILE" "$CHANGES_FILE" "$GROUP_FILE" "$ENTRIES_FILE" "$STOP_FILE"; }
 trap cleanup EXIT
+export STOP_FILE
+# queue_node writes a line to each for every node: keep them open rather
+# than opening them tens of thousands of times.
+exec 3>> "$WORK_FILE" 4>> "$CHANGES_FILE"
 
 node_count=0
 
@@ -932,7 +1214,17 @@ if [[ -n "$SINGLE_NODE" ]]; then
     fi
 else
     declare -A IN_ASTDB=()
+    latest_astdb_entries > "$ENTRIES_FILE"
+    scan_total=$(wc -l < "$ENTRIES_FILE" | tr -d ' ')
+    log "Checking which of the $scan_total nodes need to be made. This can take a minute or two."
+    scanned=0
+    scan_shown=0
     while IFS='|' read -r node callsign; do
+        # A running count on a terminal, redrawn in place.
+        if (( ++scanned % 1000 == 0 )) && [[ -t 1 ]]; then
+            printf '\r\033[KChecked %d of %d nodes (%d%%)' "$scanned" "$scan_total" $(( scanned * 100 / scan_total ))
+            scan_shown=1
+        fi
         [[ -n "$node" && -n "$callsign" ]] || continue
         IN_ASTDB["$node"]=1
         old="${PREV_CALLSIGNS[$node]-}"
@@ -958,7 +1250,8 @@ else
         else
             vlog "Skipping $node ($callsign) - output exists (resume)"
         fi
-    done < <(latest_astdb_entries)
+    done < "$ENTRIES_FILE"
+    (( scan_shown )) && printf '\r\033[K'
 
     # Node-number overrides for nodes not in astdb (private nodes).
     for node in "${!CUSTOM_TEXT[@]}" "${!NODE_OVERRIDE[@]}"; do
@@ -980,6 +1273,8 @@ else
         printf '%s: override removed, not in astdb -> announcement deleted\n' "$node" >> "$CHANGES_FILE"
     done
 fi
+
+exec 3>&- 4>&-
 
 # The previous db and overrides record what a full run applied, so a
 # single-node run (-n) leaves them alone.

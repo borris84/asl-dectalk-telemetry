@@ -130,6 +130,9 @@ if [ -d "$OUT_DIR" ] && [ -n "$(find "$OUT_DIR/" -mindepth 1 -print -quit)" ]; t
 fi
 
 mkdir -p "$OUT_DIR" || die "could not create $OUT_DIR"
+# The prompts are about to be DECtalk's: forget what elevenlabs-telemetry.sh
+# made, so it makes them all again if ElevenLabs is chosen later.
+rm -f -- "$OUT_DIR/.elevenlabs-prompts"
 
 # --- Render ----------------------------------------------------------------
 
