@@ -7,6 +7,11 @@
 # packs/pack-tool.sh.
 #
 # Needs the repository secret ELEVENLABS_API_KEY.
+#
+# GitHub turns off scheduled workflows in a repository with no activity
+# for 60 days, and publishing pack updates doesn't count. Each run
+# re-enables this workflow through the API, which restarts that count
+# without making commits.
 
 name: Voice pack updates
 
@@ -21,6 +26,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: voice-packs
@@ -37,6 +43,13 @@ jobs:
       MAX: ${{ inputs.max || '3000' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Keep the schedule alive
+        # First, so it runs even when the update fails.
+        run: |
+          gh api -X PUT "repos/$PACK_REPO/actions/workflows/voice-packs.yml/enable" \
+            && echo "Re-enabled the workflow: the 60-day inactivity count restarts." \
+            || echo "::warning::Could not re-enable the workflow."
 
       - name: Check the API key
         run: |
