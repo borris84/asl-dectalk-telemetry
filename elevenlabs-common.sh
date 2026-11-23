@@ -329,6 +329,21 @@ el_count() {
     if [[ $1 == 1 ]]; then echo "$1 $2"; else echo "$1 ${2}s"; fi
 }
 
+# el_duration REQUESTS [JOBS]  - print roughly how long sending REQUESTS
+# to ElevenLabs takes, JOBS at a time (default EL_JOBS, or 2), such as
+# "about 3.5 hours". Measured: 20,838 announcements took 3.5 hours with 2
+# jobs, about 1.2 seconds per request per job.
+el_duration() {
+    local jobs=${2:-${EL_JOBS:-2}}
+    awk -v n="$1" -v j="$jobs" 'BEGIN {
+        s = n * 1.2 / (j > 0 ? j : 1)
+        if (s < 90) print "about a minute"
+        else if (s < 3600) printf "about %d minutes\n", int(s / 60 + 0.5)
+        else if (s < 5400) print "about an hour"
+        else printf "about %.1f hours\n", s / 3600
+    }'
+}
+
 # el_cost_report CHARACTERS  - print how many credits CHARACTERS will use
 # with the configured model, and how many are left, as far as the API key
 # lets us find out.

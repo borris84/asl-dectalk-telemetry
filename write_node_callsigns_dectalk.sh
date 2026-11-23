@@ -433,6 +433,22 @@ process_one_node() {
     else
         callsign_to_speech "$callsign"
     fi
+    # A call sign field with no letter or digit to say (such as "????" or
+    # "-") is replaced by the node number: "Node 2 9 4 4 5". Each node then
+    # says something different, so nodes grouped by that field are made one
+    # by one.
+    if [[ $SPEECH_TEXT != *[[:alnum:]]* && $mode != t ]]; then
+        if (( ${#nodes[@]} > 1 )); then
+            local rc=0
+            for n in "${nodes[@]}"; do
+                process_one_node "$n" "$mode" "$callsign" "$PHONETIC" "$INCNODE" || rc=1
+            done
+            return "$rc"
+        fi
+        spell_out "$node"
+        SPEECH_TEXT="Node $SPELLED"
+        INCNODE=0  # the number is already said
+    fi
     if [[ -z "$SPEECH_TEXT" ]]; then
         for n in "${nodes[@]}"; do
             printf 'FAIL Error: Nothing speakable for node %s (%s)\n' "$n" "$callsign"
@@ -913,14 +929,21 @@ estimate_characters() {
 
 confirm_processing() {
     local node_count=$1
-    local remove_count=$2 chars
+    local remove_count=$2 chars requests
     if [[ $ENGINE == elevenlabs ]] && (( node_count )); then
         group_work
         chars=$(estimate_characters)
         if (( chars > 0 )); then
+            requests=$(wc -l < "$GROUP_FILE" | tr -d ' ')
             log "Asking ElevenLabs what this will cost..."
-            log "ElevenLabs will be sent $(el_count "$(wc -l < "$GROUP_FILE" | tr -d ' ')" request)."
+            log "ElevenLabs will be sent $(el_count "$requests" request)."
             el_cost_report "$chars"
+            # Each request takes about a second, so a full build runs for hours.
+            if (( requests * 12 / 10 / JOBS >= 600 )); then
+                log "WARNING: this will take $(el_duration "$requests" "$JOBS") ($JOBS requests at a time)."
+                log "Run it where it won't be interrupted, for example in screen or tmux,"
+                log "or with nohup. If it is stopped, run it again with -a to finish."
+            fi
         elif (( JOIN )); then
             log "The announcements are joined from the telemetry sounds: no ElevenLabs credits are used."
         fi
@@ -978,7 +1001,10 @@ report_progress() {
             if [[ "$line" == FAIL* ]]; then printf '%s\n' "$msg" >&2; else printf '%s\n' "$msg"; fi
         fi
 
-        if (( done_count % PROGRESS_EVERY == 0 && done_count < total )); then
+        # After a message, put the progress line straight back rather than
+        # leaving it off the screen until the next update.
+        if (( inplace && ! shown && done_count < total )) \
+            || (( done_count % PROGRESS_EVERY == 0 && done_count < total )); then
             msg="Processed $done_count of $total nodes ($((done_count * 100 / total))%)"
             if (( inplace )); then
                 printf '\r\033[K%s' "$msg"

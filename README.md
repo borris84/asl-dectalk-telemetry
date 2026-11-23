@@ -2,7 +2,7 @@
 
 DECtalk voice telemetry and node name announcements for AllStarLink 3 (ASL3).
 
-Version 0.20
+Version 0.21
 
 This project replaces the stock ASL3 telemetry voice with DECtalk. It also
 builds a spoken announcement for every node in the AllStarLink node
@@ -79,7 +79,7 @@ curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main
 ```
 
 The installer downloads the release files to
-`/usr/local/src/asl-dectalk-telemetry-0.20` and runs from there.
+`/usr/local/src/asl-dectalk-telemetry-0.21` and runs from there.
 
 ### Install from a copy of the repository
 
@@ -295,6 +295,8 @@ How the call sign field is spoken:
   run together.
 - Anything else, such as `FIRESIDE` or `Seattle`, is spoken as a word.
   Asterisks are dropped.
+- A field with no letter or digit in it, such as `????` or `-`, is
+  replaced by the node number: "Node 2 9 4 4 5".
 
 ### Phonetic call signs
 
@@ -700,8 +702,15 @@ its stress on a final I, and its phonemes for Delta and Papa are not used.
   the same thing are still made only once. Later runs only send the new
   and changed nodes.
 
+  A full build is also slow: each request takes about a second, so all
+  20,000 or so announcements take about 3.5 hours with `JOBS=2`. Run it
+  in `screen`, `tmux` or with `nohup` so closing your session doesn't stop
+  it. If it is stopped, run it again with `-a`: announcements that already
+  exist are skipped, so nothing is paid for twice.
+
 Before it starts, the script shows how many requests, characters and
-credits a run will use, and asks to continue (unless `-f` is given).
+credits a run will use, and how long a long run will take, and asks to
+continue (unless `-f` is given).
 
 Custom text (`text NODE = ...` or `-t`) is always spoken by ElevenLabs,
 even when joining. DECtalk commands in custom text, such as `[:ra 200]`,

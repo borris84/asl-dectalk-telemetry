@@ -40,7 +40,7 @@
 
 set -uo pipefail
 
-VERSION=0.20
+VERSION=0.21
 REPO=borris84/asl-dectalk-telemetry
 RELEASE_URL="https://github.com/$REPO/archive/refs/tags/v$VERSION.tar.gz"
 DOWNLOAD_DIR=/usr/local/src/asl-dectalk-telemetry-$VERSION
@@ -1356,7 +1356,8 @@ step_generate_el() {
     echo "  2) Spoken  Each announcement is one ElevenLabs request. Sounds the most"
     echo "             natural, but uses credits: about $chars characters"
     echo "             ${credits:+($(el_count "$credits" credit)) }for all $said, then a little more each time"
-    echo "             nodes are added or changed."
+    echo "             nodes are added or changed. Making all $said also takes"
+    echo "             a long time: $(el_duration "$said"), sending ${EL_JOBS:-2} at a time."
     default=1
     [[ $EL_NODE_METHOD == speak ]] && default=2
     ask_number 2 "$default"
