@@ -40,7 +40,7 @@
 
 set -uo pipefail
 
-VERSION=0.21
+VERSION=0.22
 REPO=borris84/asl-dectalk-telemetry
 RELEASE_URL="https://github.com/$REPO/archive/refs/tags/v$VERSION.tar.gz"
 DOWNLOAD_DIR=/usr/local/src/asl-dectalk-telemetry-$VERSION

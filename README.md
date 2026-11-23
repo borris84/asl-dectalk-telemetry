@@ -2,7 +2,7 @@
 
 DECtalk voice telemetry and node name announcements for AllStarLink 3 (ASL3).
 
-Version 0.21
+Version 0.22
 
 This project replaces the stock ASL3 telemetry voice with DECtalk. It also
 builds a spoken announcement for every node in the AllStarLink node
@@ -79,7 +79,7 @@ curl -fsSL https://raw.githubusercontent.com/borris84/asl-dectalk-telemetry/main
 ```
 
 The installer downloads the release files to
-`/usr/local/src/asl-dectalk-telemetry-0.21` and runs from there.
+`/usr/local/src/asl-dectalk-telemetry-0.22` and runs from there.
 
 ### Install from a copy of the repository
 
@@ -293,6 +293,8 @@ How the call sign field is spoken:
   "K A 4 E P S slash R".
 - `VA` and `VE` prefixes get a short pause after the V so the letters don't
   run together.
+- With ElevenLabs, each 0 in a call sign is set apart so it is read as
+  zero rather than the letter O: `KB0RIS` is sent as "KB 0 RIS".
 - Anything else, such as `FIRESIDE` or `Seattle`, is spoken as a word.
   Asterisks are dropped.
 - A field with no letter or digit in it, such as `????` or `-`, is
