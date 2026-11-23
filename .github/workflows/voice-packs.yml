@@ -42,7 +42,7 @@ jobs:
       ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
       MAX: ${{ inputs.max || '3000' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Keep the schedule alive
         # First, so it runs even when the update fails.
