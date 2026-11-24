@@ -1100,6 +1100,10 @@ step_generate_pack() {
         echo "Skipped. Run \"$EL_NODES_SCRIPT -a\" later to download it and set up the node names."
         return 0
     fi
+    echo
+    echo "Starting. Each step is shown below as it happens, with the download's"
+    echo "progress, speed and time left."
+    echo
     # Node names made another way are linked to the pack's instead.
     (( EL_CHANGED || ENGINE_CHANGED )) && args+=(-r)
     if "$BIN_DIR/$EL_NODES_SCRIPT" "${args[@]}"; then

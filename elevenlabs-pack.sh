@@ -82,13 +82,21 @@ load_pack() {
     URL=$EL_PACK_URL/pack-$NAME
 }
 
+# archive_size FILE  - print the size of one of the pack's files, such as
+# "276 MB", or nothing if it can't be found out (for messages only).
+archive_size() {
+    (( QUIET )) && return 0
+    curl -fsIL --connect-timeout 10 --max-time 20 "$URL/$1" 2> /dev/null | tr -d '\r' \
+        | awk 'tolower($1) == "content-length:" { n = $2 } END { if (n > 1048576) printf "%d MB", n / 1048576; else if (n > 0) printf "%d KB", (n + 1023) / 1024 }'
+}
+
 # fetch FILE OUT  - download one of the pack's files.
 fetch() {
     curl -fsSL --retry 3 --retry-delay 10 -o "$2" "$URL/$1"
 }
 
 cmd_sync() {
-    local tmp archive got=0 total missing incoming status=0
+    local tmp archive got=0 total missing incoming status=0 i size
     local -a archives
     [[ ${1:-} == -q ]] && QUIET=1
     [[ $(id -u) -eq 0 ]] || die "This needs root. Run it with sudo."
@@ -105,6 +113,7 @@ cmd_sync() {
     tmp=$(mktemp -d "$STORE/.sync.XXXXXX") || die "Could not create a temporary folder in $STORE"
     trap "rm -rf -- '$tmp'" EXIT
 
+    say "Checking voice pack $NAME for new announcements..."
     fetch index.tsv "$tmp/index.tsv" && fetch pack.conf "$tmp/pack.conf" \
         || die "Could not download voice pack $NAME from $URL"
     # A broken download must not be taken as the pack.
@@ -115,12 +124,20 @@ cmd_sync() {
     # is the whole pack (about 300 MB), later ones only what was added.
     mapfile -t archives < <(perl -F'\t' -lane 'BEGIN { $d = shift } print $F[2] if $F[2] ne "-" && !-e "$d/$F[0].ulaw"' \
         "$STORE/files" "$tmp/index.tsv" | sort -u)
+    if (( ${#archives[@]} )) && [[ -z $(find "$STORE/files" -maxdepth 1 -name '*.ulaw' -print -quit) ]]; then
+        say "This is the first download: the whole pack, about 300 MB. On a slow"
+        say "connection it can take a while; the progress is shown as it goes."
+    fi
+    i=0
     for archive in "${archives[@]}"; do
-        say "Downloading $archive from voice pack $NAME..."
+        i=$((i + 1))
+        size=$(archive_size "$archive")
+        say "Downloading $archive${size:+ ($size)}, $i of ${#archives[@]}, from voice pack $NAME..."
         incoming=$tmp/incoming
         rm -rf -- "$incoming" && mkdir -- "$incoming" || die "Could not create $incoming"
         if [[ -t 2 ]] && (( ! QUIET )); then
-            curl -fL -# --retry 3 --retry-delay 10 "$URL/$archive"
+            # The full meter: size, speed and time left.
+            curl -fL --retry 3 --retry-delay 10 "$URL/$archive"
         else
             curl -fsSL --retry 3 --retry-delay 10 "$URL/$archive"
         fi | xz -dc | tar -x --no-same-owner -C "$incoming" -f -

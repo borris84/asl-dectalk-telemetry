@@ -1364,8 +1364,11 @@ if [[ $ENGINE == elevenlabs ]]; then
         # Bring the pack (and its telemetry prompts) up to date. Without
         # the internet, the copy already here is used.
         if [[ -z $SINGLE_NODE ]]; then
-            # Quiet in cron; on a terminal the downloads are shown.
-            "$SCRIPT_DIR/elevenlabs-pack.sh" sync $( [[ -t 1 ]] || echo -q ) \
+            # Quiet in cron; on a terminal the downloads are shown. (Tested
+            # here, not in a $( ), whose output is never a terminal.)
+            sync_args=()
+            [[ -t 1 ]] || sync_args=(-q)
+            "$SCRIPT_DIR/elevenlabs-pack.sh" sync "${sync_args[@]}" \
                 || log "WARNING: voice pack $EL_PACK could not be brought up to date (see above). Using the copy already here."
             el_load_config || die "Could not read $EL_CONF"
         fi
