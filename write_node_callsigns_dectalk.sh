@@ -248,12 +248,17 @@ ensure_directory_exists() {
 # upper case E/N/S/W that follows a number as a compass point ("W 6 E K" is
 # spoken as "W 6 East K"). In lower case it says the letter name, and the
 # audio is otherwise identical to the upper case letter.
+#
+# For ElevenLabs, 0 is sent as the word "zero": it reads a spelled-out 0
+# as the letter O ("Node 4 0 0 4 8" as "4 O O 4 8"). Joined announcements
+# say ZERO with the digits/0 sound, so they are unchanged.
 spell_out() {
     local word=${1^^} i char
     SPELLED=""
     for (( i = 0; i < ${#word}; i++ )); do
         char=${word:i:1}
         [[ $ENGINE == dectalk && $char == [ENSW] ]] && char=${char,,}
+        [[ $ENGINE == elevenlabs && $char == 0 ]] && char=zero
         SPELLED+="$char "
     done
     SPELLED=${SPELLED% }
@@ -645,7 +650,7 @@ join_writer() {
             OSCAR => "o", PAPA => "p", QUEBEC => "q", ROMEO => "r", SIERRA => "s",
             TANGO => "t", UNIFORM => "u", VICTOR => "v", WHISKEY => "w",
             "X-RAY" => "x", YANKEE => "y", ZULU => "z");
-        my %word = (SLASH => "letters/slash", DASH => "letters/dash", NODE => "rpt/node");
+        my %word = (SLASH => "letters/slash", DASH => "letters/dash", NODE => "rpt/node", ZERO => "digits/0");
         my %cache;
         sub sound {
             my $f = "$snd/$_[0].ul";
