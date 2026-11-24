@@ -462,7 +462,7 @@ cmd_telemetry() {
 }
 
 # What preview.ul says: a node name as the pack says one, then telemetry.
-PREVIEW_TEXT="W 1 A W. Connected to node 2 0 0 0. The time is 3:15 PM. All links disconnected."
+PREVIEW_TEXT="W 1 A W. Connected to node 2 zero zero zero. The time is 3:15 PM. All links disconnected."
 
 cmd_preview() {
     local dir=$1 name tag

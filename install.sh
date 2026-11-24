@@ -833,7 +833,7 @@ make_preview_dir() {
 preview_text() {
     local digits
     digits=$(sed 's/./& /g; s/ $//' <<< "$PREVIEW_NODE")
-    echo "Node $digits. Connected to node 2 0 0 0. The time is 3:15 PM. All links disconnected."
+    echo "Node $digits. Connected to node 2 zero zero zero. The time is 3:15 PM. All links disconnected."
 }
 
 # Play the chosen voice on a local node until the user decides. Prints
