@@ -15,10 +15,11 @@
 #   5. Turn on ASL3's automatic astdb.txt (node database) updates
 #   6. Copy the scripts and their data files to /opt/asl-telem and link
 #      the scripts into /usr/local/bin so they are on the PATH
-#   7. DECtalk: choose the speaking rate. ElevenLabs: enter the API key,
-#      choose the model, the voice and its speed (saved in
-#      /opt/asl-telem/elevenlabs.conf). Either with an optional preview
-#      played on a local node
+#   7. DECtalk: choose the speaking rate. ElevenLabs: choose one of the
+#      ready-made voices (a voice pack, which needs no API key), or enter
+#      the API key and choose the model, a voice from your own library and
+#      its speed (saved in /opt/asl-telem/elevenlabs.conf). Either with an
+#      optional preview played on a local node
 #   8. Enable custom sounds in /etc/asterisk/asterisk.conf
 #   9. Point nodenames in /etc/asterisk/rpt.conf at custom/rpt/nodenames
 #  10. Check the install, then offer to generate the sounds
@@ -70,16 +71,19 @@ SPEAK_SCRIPT=dectalk-speak.sh
 EL_TELEM_SCRIPT=elevenlabs-telemetry.sh
 EL_NODES_SCRIPT=write_node_callsigns_elevenlabs.sh
 EL_SPEAK_SCRIPT=elevenlabs-speak.sh
+EL_PACK_SCRIPT=elevenlabs-pack.sh
 UPGRADE_SCRIPT=dectalk-telemetry-upgrade.sh
 # This installer is kept in INSTALL_DIR and linked into BIN_DIR under
 # this name, so settings can be changed later without the repository.
 SETUP_SCRIPT=install.sh
 SETUP_LINK=asl-telem-setup.sh
 SCRIPTS=("$TELEM_SCRIPT" "$NODES_SCRIPT" "$SPEAK_SCRIPT"
-    "$EL_TELEM_SCRIPT" "$EL_NODES_SCRIPT" "$EL_SPEAK_SCRIPT" "$UPGRADE_SCRIPT")
+    "$EL_TELEM_SCRIPT" "$EL_NODES_SCRIPT" "$EL_SPEAK_SCRIPT" "$EL_PACK_SCRIPT" "$UPGRADE_SCRIPT")
 # Code the scripts load: always replaced, not put on the PATH.
 LIB_FILES=(elevenlabs-common.sh)
 DATA_FILES=(dec-init.cfg prompt-list.txt elevenlabs-prompt-list.txt)
+# The ready-made ElevenLabs voices (packs/NAME.conf): always replaced.
+PACK_CONFS=(packs/callum.conf packs/sarah.conf packs/daniel.conf packs/alice.conf)
 # Installed only if missing: the user's own settings, never replaced.
 USER_FILES=(node-overrides.conf)
 
@@ -391,7 +395,15 @@ nodes_script() {
 
 # Print the programs the chosen engine's scripts need.
 needed_programs() {
-    if [[ $ENGINE == elevenlabs ]]; then echo perl curl; else echo ffmpeg perl; fi
+    if [[ $ENGINE == elevenlabs ]]; then echo perl curl xz; else echo ffmpeg perl; fi
+}
+
+# Print the Debian package that has program $1.
+program_package() {
+    case $1 in
+        xz) echo xz-utils ;;
+        *) echo "$1" ;;
+    esac
 }
 
 step_packages() {
@@ -400,10 +412,10 @@ step_packages() {
     step "Other required programs"
 
     for p in $(needed_programs); do
-        command -v "$p" > /dev/null || missing+=("$p")
+        command -v "$p" > /dev/null || missing+=("$(program_package "$p")")
     done
     if (( ${#missing[@]} == 0 )); then
-        echo "$(needed_programs | sed 's/ / and /') are already installed."
+        echo "$(needed_programs | sed -E 's/ ([^ ]+)$/ and \1/; s/ ([^ ]+ and)/, \1/g; s/ ([^ ,]+),/, \1,/g') are already installed."
         return
     fi
 
@@ -526,8 +538,8 @@ copy_files() {
         install -m 755 -- "$SRC_DIR/$f" "$INSTALL_DIR/$f" || die "Could not copy $f"
         echo "Installed $INSTALL_DIR/$f"
     done
-    for f in "${LIB_FILES[@]}"; do
-        install -m 644 -- "$SRC_DIR/$f" "$INSTALL_DIR/$f" || die "Could not copy $f"
+    for f in "${LIB_FILES[@]}" "${PACK_CONFS[@]}"; do
+        install -D -m 644 -- "$SRC_DIR/$f" "$INSTALL_DIR/$f" || die "Could not copy $f"
         echo "Installed $INSTALL_DIR/$f"
     done
 
@@ -592,9 +604,11 @@ choose_engine() {
     echo "  1) DECtalk     Runs on this node: fast, free, and needs no internet"
     echo "                 connection once installed. The classic synthesized voice."
     echo "  2) ElevenLabs  Natural sounding voices from ElevenLabs' online service."
-    echo "                 Needs an ElevenLabs plan with API access. Every sound made"
-    echo "                 uses credits, and announcing each node by its call sign"
-    echo "                 can use a lot of them (there are tens of thousands of nodes)."
+    echo "                 Four ready-made voices need no ElevenLabs account: every"
+    echo "                 node name and telemetry prompt is downloaded already made."
+    echo "                 Any other voice needs an ElevenLabs plan with API access,"
+    echo "                 and every sound made uses credits (announcing each node by"
+    echo "                 its call sign can use a lot: there are tens of thousands)."
     ask_number 2 "$default"
     if (( CHOICE == 2 )); then ENGINE=elevenlabs; else ENGINE=dectalk; fi
     [[ -n $OLD_ENGINE && $ENGINE != "$OLD_ENGINE" ]] && ENGINE_CHANGED=1
@@ -643,16 +657,33 @@ step_el_key() {
     echo
     echo "  $EL_KEYS_URL"
     echo
+    key_permissions
+    read_el_key 0
+}
+
+key_permissions() {
     echo "Give the key access to Text to Speech, and read access to Voices and"
     echo "Models. Read access to User lets the scripts show the credits you have"
     echo "left. The key is saved in $EL_CONF, which only root can read."
     echo
+}
+
+# read_el_key OPTIONAL  - ask for an API key until one works, and save it.
+# With OPTIONAL 1, pressing Enter returns 1 and keeps the key as it was;
+# with 0 it stops the installation.
+read_el_key() {
+    local optional=$1 key count old=$EL_API_KEY prompt="press Enter to stop"
+    (( optional )) && prompt="press Enter to skip"
     while true; do
-        read -r -s -p "Paste your API key (it is not shown), or press Enter to stop: " key \
+        read -r -s -p "Paste your API key (it is not shown), or $prompt: " key \
             || { echo; die "No answer given. Installation stopped."; }
         echo
         key=${key//[[:space:]]/}
-        [[ -n $key ]] || die "The ElevenLabs scripts need an API key. Installation stopped."
+        if [[ -z $key ]]; then
+            EL_API_KEY=$old
+            (( optional )) && return 1
+            die "The ElevenLabs scripts need an API key. Installation stopped."
+        fi
         EL_API_KEY=$key
         echo "Checking the key..."
         if el_voices; then
@@ -726,16 +757,28 @@ step_el_model() {
 # Put the chosen voice in EL_VOICE_ID and EL_VOICE_NAME.
 choose_voice() {
     local -a vids=() vnames=()
-    local id name desc i=0 default=1
+    local -A ready=()
+    local id name desc i=0 default=1 any_ready=0 pname
+    while IFS=$'\t' read -r pname id _; do ready[$id]=$pname; done < <(el_pack_list)
     echo "Voices in your ElevenLabs library:"
     while IFS=$'\t' read -r id name desc; do
         vids+=("$id")
         vnames+=("$name")
         i=$((i + 1))
         [[ $id == "$EL_VOICE_ID" ]] && default=$i
-        printf '  %2d) %s%s%s\n' "$i" "$name" "${desc:+ ($desc)}" "$( [[ $id == "$EL_VOICE_ID" ]] && echo " (current)")"
+        [[ -n ${ready[$id]:-} ]] && any_ready=1
+        printf '  %2d) %s%s%s%s\n' "$i" "$name" "${desc:+ ($desc)}" \
+            "$( [[ -n ${ready[$id]:-} ]] && echo " [also ready-made]")" \
+            "$( [[ $id == "$EL_VOICE_ID" ]] && echo " (current)")"
     done <<< "$EL_VOICE_LIST"
     echo "Add more voices to your library at $EL_URL/app/voice-library"
+    if (( any_ready )); then
+        echo
+        echo "[also ready-made]: chosen here, this voice makes everything with your"
+        echo "credits, with the model and speed you choose. To get its announcements"
+        echo "ready-made instead, for free, run sudo $SETUP_LINK again and choose it"
+        echo "from the ready-made voices."
+    fi
     ask_number "${#vids[@]}" "$default"
     EL_VOICE_ID=${vids[$((CHOICE - 1))]}
     EL_VOICE_NAME=${vnames[$((CHOICE - 1))]}
@@ -856,6 +899,193 @@ step_el_voice() {
     echo "Using the voice $EL_VOICE_NAME at speed $EL_SPEED."
     [[ $(el_signature) != "$EL_START_SIGNATURE" ]] && EL_CHANGED=1
     return 0
+}
+
+# --- ElevenLabs ready-made voices (voice packs) ----------------------------
+
+USE_PACK=0
+PACK_PREVIEW=0
+PACK_PREVIEW_ASKED=0
+
+# Choose between the ready-made voices and a voice of your own. Sets
+# USE_PACK, and for a ready-made voice saves its settings.
+step_el_source() {
+    local -a names=() voices=() descs=()
+    local name id voice accent gender i default=1 own note nodes said chars start_method
+    step "ElevenLabs voice"
+
+    el_load_config || el_defaults
+    EL_START_SIGNATURE=$(el_signature)
+    start_method=$EL_NODE_METHOD
+    while IFS=$'\t' read -r name id voice accent gender; do
+        names+=("$name")
+        voices+=("$voice")
+        descs+=("${accent^}, $gender")
+    done < <(el_pack_list)
+    (( ${#names[@]} )) || die "No ready-made voices found in $SRC_DIR/packs."
+    own=$(( ${#names[@]} + 1 ))
+    if [[ $EL_NODE_METHOD == pack ]]; then
+        for i in "${!names[@]}"; do [[ ${names[$i]} == "$EL_PACK" ]] && default=$((i + 1)); done
+    elif [[ -n $EL_VOICE_ID ]]; then
+        default=$own
+    fi
+    read -r nodes said chars <<< "$(astdb_size 0 0)"
+
+    while true; do
+        echo "There are two kinds of ElevenLabs voice here."
+        echo
+        echo "READY-MADE VOICES: no API key and no credits needed"
+        echo "  Every node name announcement and telemetry prompt is already made in"
+        echo "  these voices. They are downloaded (about 300 MB) and kept up to date"
+        echo "  with new nodes every day. The settings are fixed: model"
+        echo "  eleven_v4_turbo at speed 1.2, call signs spelled with letters (not"
+        echo "  phonetic) and without the node number."
+        for i in "${!names[@]}"; do
+            note=""
+            [[ $start_method == pack && ${names[$i]} == "$EL_PACK" ]] && note=" (current)"
+            printf '  %d) %-17s %s%s\n' $((i + 1)) "${descs[$i]}" "${voices[$i]}" "$note"
+        done
+        echo
+        echo "YOUR OWN VOICE: needs an ElevenLabs plan with API access"
+        echo "  Any voice in your ElevenLabs library, with the model and speed you"
+        echo "  choose, and call signs phonetic or with the node number if you like."
+        echo "  Everything is made with your own credits on this node. Speaking all"
+        if (( said > 0 )); then
+            echo "  the node names is about $said requests and takes $(el_duration "$said");"
+        else
+            echo "  the node names is about 20,000 requests and takes hours;"
+        fi
+        echo "  joining them from the telemetry sounds instead is free but less natural."
+        note=""
+        [[ $start_method != pack && -n $EL_VOICE_ID ]] && note=" (current: ${EL_VOICE_NAME:-$EL_VOICE_ID})"
+        printf '  %d) Choose a voice from your ElevenLabs library%s\n' "$own" "$note"
+        ask_number "$own" "$default"
+        if (( CHOICE == own )); then
+            USE_PACK=0
+            if [[ $start_method == pack ]]; then
+                # The node names are the pack's: make them again.
+                EL_CHANGED=1
+                EL_PACK=""
+                EL_NODE_METHOD=""
+                save_el_config
+            fi
+            return 0
+        fi
+        default=$CHOICE
+        name=${names[$((CHOICE - 1))]}
+        voice=${voices[$((CHOICE - 1))]}
+        preview_pack "$name" "$voice" && break
+        echo
+    done
+
+    el_use_pack "$name" || die "Ready-made voice $name not found"
+    save_el_config
+    USE_PACK=1
+    echo "Using the ready-made voice $voice (voice pack $name)."
+    [[ $(el_signature) != "$EL_START_SIGNATURE" || $start_method != pack ]] && EL_CHANGED=1
+    return 0
+}
+
+# preview_pack NAME VOICE  - offer to play the ready-made voice's sample
+# (preview.ul in its pack) on a local node. Returns 1 to choose another
+# voice.
+preview_pack() {
+    local name=$1 voice=$2
+    if (( ! PACK_PREVIEW_ASKED )); then
+        PACK_PREVIEW_ASKED=1
+        echo
+        echo "You can hear a short sample of each ready-made voice on a node on this"
+        echo "system. It is played like any other announcement, so it is transmitted"
+        echo "if the node has a radio. No credits are used."
+        if ask_yn "Hear the samples on a local node?" y; then
+            choose_preview_node && PACK_PREVIEW=1
+        fi
+    fi
+    (( PACK_PREVIEW )) || return 0
+    make_preview_dir || return 0
+    echo "Downloading the sample of $voice..."
+    if ! curl -fsSL --retry 2 -o "$PREVIEW_DIR/preview.ul" "$EL_PACK_URL/pack-$name/preview.ul"; then
+        echo "The sample could not be downloaded."
+        return 0
+    fi
+    chmod 644 -- "$PREVIEW_DIR/preview.ul"
+    play_preview
+    while true; do
+        echo
+        echo "  1) Play it again"
+        echo "  2) Choose a different voice"
+        echo "  3) Use $voice"
+        ask_number 3 3
+        case $CHOICE in
+            1) play_preview ;;
+            2) return 1 ;;
+            3) return 0 ;;
+        esac
+    done
+}
+
+# A ready-made voice needs no API key; one lets you speak your own text in
+# the same voice.
+step_el_pack_key() {
+    step "ElevenLabs API key (optional)"
+    echo "The ready-made voice needs no API key. With one, you can also speak"
+    echo "your own text on the node ($EL_SPEAK_SCRIPT) in the same voice, and"
+    echo "node name overrides, phonetic or numbered names are spoken rather than"
+    echo "joined from the telemetry sounds. A free ElevenLabs account is enough."
+    echo
+    if [[ -n $EL_API_KEY ]]; then
+        echo "An API key is saved in $EL_CONF (ending in ...${EL_API_KEY: -4})."
+        if el_voices; then echo "It works."; else echo "It does not work: $EL_ERROR"; fi
+        echo "  1) Keep it"
+        echo "  2) Enter a different key"
+        echo "  3) Remove it"
+        ask_number 3 1
+        case $CHOICE in
+            1) return 0 ;;
+            2) key_permissions; read_el_key 1 || echo "Kept the saved key." ;;
+            3) EL_API_KEY=""; save_el_config; echo "Removed the API key from $EL_CONF." ;;
+        esac
+        return 0
+    fi
+    if ! ask_yn "Add an API key now?" n; then
+        echo "Skipped. To add one later, run: sudo $SETUP_LINK"
+        return 0
+    fi
+    echo "Create a key at $EL_KEYS_URL"
+    key_permissions
+    read_el_key 1 || echo "Skipped. To add one later, run: sudo $SETUP_LINK"
+}
+
+# Download the voice pack and point the node names at it.
+step_generate_pack() {
+    local -a args=(-a)
+    local free dir=$EL_PACK_ROOT
+    step "Download the voice pack"
+
+    echo "Voice pack $EL_PACK ($EL_VOICE_NAME) has every telemetry prompt and"
+    echo "node name announcement. The first download is about 300 MB and takes"
+    echo "about 450 MB in $EL_PACK_ROOT. Each node's announcement is a hard link"
+    echo "to the pack's, so it takes no more room. The pack's telemetry prompts"
+    echo "replace the ones in /usr/share/asterisk/sounds/custom. After that, each"
+    echo "run of $EL_NODES_SCRIPT downloads only what is new."
+    while [[ ! -d $dir ]]; do dir=$(dirname "$dir"); done
+    free=$(df -Pm -- "$dir" | awk 'NR == 2 { print $4 }')
+    if [[ $free =~ ^[0-9]+$ ]] && (( free < 1000 )); then
+        echo
+        echo "WARNING: only $free MB is free on the disk that holds $EL_PACK_ROOT."
+    fi
+    echo
+    if ! ask_yn "Download the voice pack and set up the node names now?" y; then
+        echo "Skipped. Run \"$EL_NODES_SCRIPT -a\" later to download it and set up the node names."
+        return 0
+    fi
+    # Node names made another way are linked to the pack's instead.
+    (( EL_CHANGED || ENGINE_CHANGED )) && args+=(-r)
+    if "$BIN_DIR/$EL_NODES_SCRIPT" "${args[@]}"; then
+        nodes_reminder "$EL_NODES_SCRIPT" "${args[@]}"
+    else
+        echo "$EL_NODES_SCRIPT reported a problem (see above)."
+    fi
 }
 
 # --- Speaking rate -------------------------------------------------
@@ -1211,8 +1441,14 @@ run_checks() {
 
     if [[ $ENGINE == elevenlabs ]]; then
         el_load_config || el_defaults
-        check "$EL_CONF has an API key and a voice" el_configured
-        check "The ElevenLabs API key works" 'el_configured && el_voices 2> /dev/null'
+        if [[ $EL_NODE_METHOD == pack ]]; then
+            check "$EL_CONF uses a ready-made voice (voice pack ${EL_PACK:-none})" \
+                '[[ -n $EL_PACK && -f $INSTALL_DIR/packs/$EL_PACK.conf ]]'
+            [[ -n $EL_API_KEY ]] && check "The ElevenLabs API key works (optional)" 'el_voices 2> /dev/null'
+        else
+            check "$EL_CONF has an API key and a voice" el_configured
+            check "The ElevenLabs API key works" 'el_configured && el_voices 2> /dev/null'
+        fi
     else
         check "DECtalk speaks ($SAY)" dectalk_works
     fi
@@ -1223,7 +1459,7 @@ run_checks() {
         check "$f is on the PATH" "[[ \$(command -v $f) == $BIN_DIR/$f && -x $INSTALL_DIR/$f ]]"
     done
     check "$SETUP_LINK is on the PATH" "[[ \$(command -v $SETUP_LINK) == $BIN_DIR/$SETUP_LINK && -x $INSTALL_DIR/$SETUP_SCRIPT ]]"
-    for f in "${LIB_FILES[@]}" "${DATA_FILES[@]}"; do
+    for f in "${LIB_FILES[@]}" "${DATA_FILES[@]}" "${PACK_CONFS[@]}"; do
         check "$INSTALL_DIR/$f is present" "[[ -f $INSTALL_DIR/$f ]]"
     done
     check "Node database updates are on (asl3-update-astdb.timer)" astdb_updates_on
@@ -1312,6 +1548,10 @@ astdb_size() {
 step_generate_el() {
     local -a args=(-a)
     local nodes said chars rate credits method default phon=0 num=0
+    if [[ $EL_NODE_METHOD == pack ]]; then
+        step_generate_pack
+        return
+    fi
     step "Generate the sounds"
 
     echo "The telemetry prompts must be generated before the node names."
@@ -1405,6 +1645,10 @@ nodes_reminder() {
     if [[ $script == "$EL_NODES_SCRIPT" ]] && grep -q '^NODE_METHOD=speak' "$EL_CONF" 2> /dev/null; then
         echo "Each run speaks only the new and changed nodes, which uses some credits."
         echo
+    elif [[ $script == "$EL_NODES_SCRIPT" ]] && grep -q '^NODE_METHOD=pack' "$EL_CONF" 2> /dev/null; then
+        echo "Each run first downloads what is new in the voice pack, telemetry"
+        echo "prompts included, and uses no credits."
+        echo
     fi
     echo "To change the speech engine, voice, speaking rate or other settings"
     echo "later, run: sudo $SETUP_LINK"
@@ -1451,6 +1695,11 @@ upgrade() {
     fi
     echo
     echo "Upgrade to $VERSION done. Existing sounds were not changed."
+    if [[ $ENGINE == elevenlabs ]] && ! grep -q '^NODE_METHOD=pack' "$EL_CONF" 2> /dev/null; then
+        echo "Four ready-made ElevenLabs voices need no API key or credits: every node"
+        echo "name and telemetry prompt is downloaded already made. To use one, run:"
+        echo "  sudo $SETUP_LINK"
+    fi
     echo "Next time, upgrade with: sudo $UPGRADE_SCRIPT"
     echo "To use changes in this version, regenerate them as described in the"
     if [[ $ENGINE == elevenlabs ]]; then
@@ -1493,7 +1742,7 @@ is_asl3 || die "AllStarLink 3 (ASL3) is not installed (package 'asl3' not found)
 [[ -f $RPT_CONF ]] || die "$RPT_CONF not found. Nothing was changed."
 
 have_files=1
-for f in "${SCRIPTS[@]}" "${LIB_FILES[@]}" "${DATA_FILES[@]}" "${USER_FILES[@]}"; do
+for f in "${SCRIPTS[@]}" "${LIB_FILES[@]}" "${DATA_FILES[@]}" "${USER_FILES[@]}" "${PACK_CONFS[@]}"; do
     [[ -n $SRC_DIR && -f $SRC_DIR/$f ]] || have_files=0
 done
 if (( ! have_files )); then
@@ -1512,6 +1761,8 @@ if (( ! have_files )); then
 fi
 
 # The ElevenLabs code, with its settings where the scripts will look.
+# SCRIPT_DIR: where it finds the ready-made voices (packs/).
+SCRIPT_DIR=$SRC_DIR
 EL_CONF=$INSTALL_DIR/elevenlabs.conf
 # shellcheck source=elevenlabs-common.sh
 . "$SRC_DIR/elevenlabs-common.sh"
@@ -1527,16 +1778,16 @@ choose_engine
 
 if [[ $ENGINE == elevenlabs ]]; then
     PLAN=(
-        "Install perl and curl if they are missing"
+        "Install perl, curl and xz if they are missing"
         "Turn on automatic updates of the node database ($ASTDB)"
         "Copy the scripts to $INSTALL_DIR and put them on the PATH"
-        "Enter your ElevenLabs API key"
-        "Choose the ElevenLabs model"
-        "Choose a voice and its speed, with an optional preview on your node"
+        "Choose a voice: one of four ready-made voices (no API key needed), or"
+        "   one from your own ElevenLabs library (API key, model, voice and speed),"
+        "   with an optional preview on your node"
         "Allow custom sounds in $ASTERISK_CONF"
         "Point node names in $RPT_CONF at $NODENAMES_DIR"
         "Check that everything is installed"
-        "Offer to generate the telemetry and node name sounds"
+        "Offer to download the ready-made voice, or to generate the sounds"
     )
 else
     PLAN=(
@@ -1553,8 +1804,15 @@ else
 fi
 echo
 echo "This will:"
-for i in "${!PLAN[@]}"; do
-    printf '  %d. %s\n' $((i + 1)) "${PLAN[$i]}"
+# An entry starting with spaces continues the one before it.
+n=0
+for line in "${PLAN[@]}"; do
+    if [[ $line == " "* ]]; then
+        printf '     %s\n' "${line#"${line%%[! ]*}"}"
+    else
+        n=$((n + 1))
+        printf '  %d. %s\n' "$n" "$line"
+    fi
 done
 echo
 echo "You will be asked before each change. Config files are backed up first."
@@ -1565,9 +1823,14 @@ if [[ $ENGINE == elevenlabs ]]; then
     step_packages
     step_node_database
     step_scripts
-    step_el_key
-    step_el_model
-    step_el_voice
+    step_el_source
+    if (( USE_PACK )); then
+        step_el_pack_key
+    else
+        step_el_key
+        step_el_model
+        step_el_voice
+    fi
 else
     step_dectalk
     step_packages
@@ -1592,7 +1855,11 @@ fi
 
 echo
 if [[ $ENGINE == elevenlabs ]]; then
-    echo "Done. Run \"$EL_TELEM_SCRIPT\" or \"$EL_NODES_SCRIPT -h\" from anywhere."
+    if [[ $EL_NODE_METHOD == pack ]]; then
+        echo "Done. Run \"$EL_NODES_SCRIPT -h\" or \"$EL_PACK_SCRIPT status\" from anywhere."
+    else
+        echo "Done. Run \"$EL_TELEM_SCRIPT\" or \"$EL_NODES_SCRIPT -h\" from anywhere."
+    fi
     echo "To speak your own text on the node, run \"$EL_SPEAK_SCRIPT -h\" for how."
 else
     echo "Done. Run \"$TELEM_SCRIPT\" or \"$NODES_SCRIPT -h\" from anywhere."

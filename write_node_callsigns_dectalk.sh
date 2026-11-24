@@ -54,6 +54,15 @@
 #     phonetic alphabet sounds made by elevenlabs-telemetry.sh, with short
 #     gaps between them. Costs nothing, but sounds less natural. Custom
 #     text (-t) is still spoken by ElevenLabs.
+#   - pack (NODE_METHOD=pack): the announcements come ready-made from a
+#     voice pack (elevenlabs-pack.sh), which is brought up to date first.
+#     Each node's file is a hard link to the pack's announcement for what
+#     it says, so it costs nothing and needs no API key. A new call sign
+#     the pack doesn't have yet is joined for now, and replaced by the
+#     pack's announcement on a later run once the pack has it. Anything
+#     else the pack can't have (overrides, -i, -P, custom text) is spoken
+#     with ElevenLabs if there is an API key, or else joined (custom text
+#     needs a key).
 # The default is NODE_METHOD in elevenlabs.conf.
 
 set -euo pipefail
@@ -97,6 +106,13 @@ LIST_ONLY=0
 PRINT_TEXT=0
 
 declare -A PREV_CALLSIGNS
+# NODE_METHOD=pack: nodes joined because the voice pack didn't have their
+# call sign yet, looked up again on every run (see PENDING_SAVED).
+declare -A PACK_PENDING=()
+PACK_FILES=""
+PACK_KEY=0
+PENDING_SAVED=""
+PENDING_FILE=""
 # Overrides from the overrides file, and the ones applied by the last run.
 declare -A NODE_OVERRIDE PREV_NODE_OVERRIDE  # node -> replacement callsign field
 declare -A CALL_OVERRIDE PREV_CALL_OVERRIDE  # CALLSIGN -> replacement callsign field
@@ -167,6 +183,9 @@ EOF
    -J          Join each announcement from the letter, digit and phonetic
                sounds made by elevenlabs-telemetry.sh: free, less natural.
                Without -S or -J, NODE_METHOD in elevenlabs.conf is used.
+               NODE_METHOD=pack takes the announcements from the
+               ready-made voice pack (PACK), updated first: no API key or
+               credits needed.
 
 Output files are raw headerless u-law (.ulaw), made with the ElevenLabs
 voice in elevenlabs.conf.
@@ -416,7 +435,8 @@ node_number_text() {
 # which report_progress counts and displays.
 #   $1 nodes: comma-separated. The first node's file is rendered and the
 #      others are hard links to it, so the audio is stored once.
-#   $2 mode: c = $3 is a callsign field (astdb or -o), t = $3 is -t text
+#   $2 mode: c = $3 is the astdb callsign field, o = a callsign field from
+#      an override (-o), t = $3 is -t text
 #   $4 / $5: 1 or 0 for these nodes' -P and -i (their mode, or the defaults)
 process_one_node() {
     local -a nodes
@@ -432,8 +452,9 @@ process_one_node() {
     local text n link
 
     # ElevenLabs refused for the whole account (no credits, bad key): the
-    # rest would fail too, so don't send them.
-    if [[ -n ${STOP_FILE:-} && -e $STOP_FILE ]]; then
+    # rest would fail too, so don't send them. (A voice pack still links
+    # and joins: see below.)
+    if [[ -z ${PACK_FILES:-} && -n ${STOP_FILE:-} && -e $STOP_FILE ]]; then
         for n in "${nodes[@]}"; do
             printf 'FAIL -\n'  # counted, not shown
         done
@@ -476,6 +497,36 @@ process_one_node() {
         if [[ $text == *. ]]; then text+=" Node $SPELLED"; else text+=", node $SPELLED"; fi
     fi
 
+    # A voice pack: link to its announcement of this text, if it has one.
+    if [[ -n ${PACK_FILES:-} ]]; then
+        if [[ $mode == t ]]; then
+            if (( ! PACK_KEY )) || [[ -n ${STOP_FILE:-} && -e $STOP_FILE ]]; then
+                for n in "${nodes[@]}"; do
+                    printf 'FAIL Custom text needs a working ElevenLabs API key (sudo asl-telem-setup.sh) for node %s\n' "$n"
+                done
+                return 1
+            fi
+        else
+            # join_writer links these to the pack's announcement, or joins
+            # them if it has none: J for a plain call sign, which the pack
+            # will have soon (so it is looked up again on the next run),
+            # j for anything else when there is no API key to speak it.
+            local kind=""
+            if [[ $mode == c ]] && (( ! PHONETIC && ! INCNODE )); then
+                kind=J
+            elif (( ! PACK_KEY )) || [[ -n ${STOP_FILE:-} && -e $STOP_FILE ]]; then
+                kind=j
+            fi
+            if [[ -n $kind ]]; then
+                printf 'PACK\t%s\t%s\t%s\t%s\n' "$1" "${callsign//$'\t'/ }" "$text" "$kind"
+                return 0
+            fi
+            # With a key, what the pack doesn't have is spoken.
+            link_pack_announcement "$1" "$callsign" "$text" && return 0
+            (( $? == 1 )) || return 1
+        fi
+    fi
+
     # Joined announcements are written by join_writer, one process for the
     # whole run, which is far quicker than starting cat for each one.
     if [[ $ENGINE == elevenlabs && $JOIN == 1 && $mode != t ]]; then
@@ -510,6 +561,35 @@ process_one_node() {
     done
 }
 
+# link_pack_announcement NODES CALLSIGN TEXT  - point each node's file
+# (NODES comma-separated) at the voice pack's announcement of TEXT, a file
+# named after TEXT's MD5, printing an OK or FAIL line per node. Each link
+# is made under a temp name and renamed, so a node always has a complete
+# announcement, and the pack's file itself is never written to. Returns 1
+# if the pack doesn't have TEXT (nothing printed), 2 if a link failed.
+link_pack_announcement() {
+    local -a nodes
+    IFS=, read -r -a nodes <<< "$1"
+    local callsign=$2 text=$3 hash src n out rc=0
+    hash=$(printf '%s' "$text" | md5sum)
+    src=$PACK_FILES/${hash%% *}.ulaw
+    [[ -f $src ]] || return 1
+    for n in "${nodes[@]}"; do
+        out="$DESTDIR/$n.ulaw"
+        if [[ $out -ef $src ]]; then
+            printf 'OK %s %s -> %s (voice pack, already linked)\n' "$n" "$callsign" "$text"
+        elif { ln -f -- "$src" "$out.tmp.$$" 2> /dev/null || cp -- "$src" "$out.tmp.$$"; } \
+            && mv -f -- "$out.tmp.$$" "$out"; then
+            printf 'OK %s %s -> %s (voice pack)\n' "$n" "$callsign" "$text"
+        else
+            rm -f -- "$out.tmp.$$"
+            printf 'FAIL Could not link node %s to %s\n' "$n" "$src"
+            rc=2
+        fi
+    done
+    return $rc
+}
+
 # render_announcement MODE TEXT OUT  - write TEXT spoken by the engine to
 # OUT as 8 kHz u-law. (Joined announcements are made by join_writer.) On
 # failure RENDER_ERROR says why.
@@ -539,6 +619,12 @@ render_announcement() {
 # announcement for each "JOIN<TAB>nodes<TAB>callsign<TAB>text" line, printing
 # an OK or FAIL line per node for report_progress.
 #
+# A "PACK<TAB>nodes<TAB>callsign<TAB>text<TAB>kind" line (NODE_METHOD=pack)
+# links the nodes to the voice pack's announcement of TEXT, the file in
+# PACK_FILES named after TEXT's MD5, as link_pack_announcement does. If the
+# pack has none, the announcement is joined instead, and with kind J the
+# nodes are added to PENDING_FILE.
+#
 # TEXT (as made by callsign_to_speech) is built from the telemetry sounds in
 # SOUNDS_DIR: a single letter or digit, a phonetic alphabet word, "slash",
 # "dash" and "node" each have their own sound, and any other word is
@@ -549,7 +635,9 @@ render_announcement() {
 join_writer() {
     perl -e '
         use strict; use warnings;
-        my ($dest, $snd, $gap_short, $gap_long) = @ARGV;
+        use Digest::MD5 qw(md5_hex);
+        use File::Copy qw(copy);
+        my ($dest, $snd, $gap_short, $gap_long, $pack, $pending) = @ARGV;
         my ($short, $long) = ("\xff" x $gap_short, "\xff" x $gap_long);
         my %phon = (ALFA => "a", BRAVO => "b", CHARLIE => "c", DELTA => "d",
             ECHO => "e", FOXTROT => "f", GOLF => "g", HOTEL => "h", INDIA => "i",
@@ -569,6 +657,31 @@ join_writer() {
         }
         $| = 1;
         while (my $line = <STDIN>) {
+            if ($pack ne "" && $line =~ /^PACK\t/) {
+                chomp $line;
+                my (undef, $list, $call, $text, $kind) = split /\t/, $line, 5;
+                my $src = "$pack/" . md5_hex($text) . ".ulaw";
+                if (my @s = stat $src) {
+                    for my $n (split /,/, $list) {
+                        my $out = "$dest/$n.ulaw";
+                        my @d = stat $out;
+                        if (@d && $d[0] == $s[0] && $d[1] == $s[1]) {
+                            print "OK $n $call -> $text (voice pack, already linked)\n";
+                        } elsif ((link($src, "$out.tmp.$$") || copy($src, "$out.tmp.$$")) && rename("$out.tmp.$$", $out)) {
+                            print "OK $n $call -> $text (voice pack)\n";
+                        } else {
+                            unlink "$out.tmp.$$";
+                            print "FAIL Could not link node $n to $src\n";
+                        }
+                    }
+                    next;
+                }
+                if ($kind eq "J" && open(my $p, ">>", $pending)) {
+                    print $p "$_\n" for split /,/, $list;
+                    close $p;
+                }
+                $line = "JOIN\t$list\t$call\t$text\n";
+            }
             if ($line !~ /^JOIN\t/) { print $line; next }
             chomp $line;
             my (undef, $list, $call, $text) = split /\t/, $line, 4;
@@ -636,11 +749,11 @@ join_writer() {
                 }
             }
         }
-    ' -- "$DESTDIR" "$SOUNDS_DIR" "$GAP_SHORT_BYTES" "$GAP_LONG_BYTES"
+    ' -- "$DESTDIR" "$SOUNDS_DIR" "$GAP_SHORT_BYTES" "$GAP_LONG_BYTES" "$PACK_FILES" "$PENDING_FILE"
 }
 
 export -f process_one_node callsign_to_speech is_callsign spell_out phonetic_items node_number_text \
-    render_announcement
+    render_announcement link_pack_announcement
 
 load_previous_database() {
     PREV_CALLSIGNS=()
@@ -674,7 +787,8 @@ lookup_node_callsign() {
 # resolve_with SET NODE CALLSIGN
 # Work out what to speak for a node under a set of overrides (SET is "" for
 # the current ones or "PREV_" for the last run's) into:
-#   SPEAK_MODE, SPEAK_VALUE  what to say (see process_one_node)
+#   SPEAK_MODE, SPEAK_VALUE  what to say (see process_one_node; o is a
+#                            call sign field from an override)
 #   SPEAK_PHON, SPEAK_NUM    1 or 0 for -P and -i, after any mode entry
 #   SPEAK_WORDS              the mode entry's words, or empty
 # Returns 0 if an override or text entry applies (a mode alone doesn't count).
@@ -706,8 +820,10 @@ resolve_with() {
         SPEAK_MODE=t
         SPEAK_VALUE=${_rw_text[$node]}
     elif [[ -n ${_rw_node[$node]+x} ]]; then
+        SPEAK_MODE=o
         SPEAK_VALUE=${_rw_node[$node]}
     elif [[ -n $call_key && -n ${_rw_call[$call_key]+x} ]]; then
+        SPEAK_MODE=o
         SPEAK_VALUE=${_rw_call[$call_key]}
     else
         return 1
@@ -757,6 +873,8 @@ needs_rebuild() {
 
     (( FORCE_REBUILD )) && return 0
     [[ -f "$out" ]] || return 0
+    # Joined until the voice pack has it.
+    [[ -n ${PACK_PENDING[$node]+x} ]] && return 0
     override_changed "$node" "$callsign" && return 0
 
     # Existing file: rebuild only when we know the callsign changed.
@@ -927,16 +1045,20 @@ save_override_snapshot() {
     vlog "Updated previous overrides: $PREV_OVERRIDES"
 }
 
-# Print an estimate of the characters ElevenLabs will be sent for the
-# work in GROUP_FILE (a call sign is sent as it is, but phonetic words are
-# about 5.5 times as long).
+# Print "CHARACTERS REQUESTS": an estimate of the characters ElevenLabs
+# will be sent for the work in GROUP_FILE (a call sign is sent as it is,
+# but phonetic words are about 5.5 times as long), and in how many
+# requests.
 estimate_characters() {
-    awk -F'|' -v join="${JOIN:-0}" '
-        $2 == "t" { n += length($3); next }
+    awk -F'|' -v join="${JOIN:-0}" -v pack="$( [[ -n $PACK_FILES ]] && echo "$PACK_KEY" || echo -)" '
+        # From a voice pack: only what it cannot have is spoken, with a key
+        # (plain call signs it lacks yet are joined).
+        pack == 0 || (pack == 1 && $2 == "c" && $4 != 1 && $5 != 1) { next }
+        $2 == "t" { n += length($3); r++; next }
         join == 1 { next }
-        { n += ($4 == 1 ? 5.5 : 1.1) * length($3) }
+        { n += ($4 == 1 ? 5.5 : 1.1) * length($3); r++ }
         $5 == 1 { n += 7 + 2 * length($1) }
-        END { printf "%d\n", n }
+        END { printf "%d %d\n", n, r }
     ' "$GROUP_FILE"
 }
 
@@ -945,11 +1067,14 @@ confirm_processing() {
     local remove_count=$2 chars requests
     if [[ $ENGINE == elevenlabs ]] && (( node_count )); then
         group_work
-        chars=$(estimate_characters)
+        read -r chars requests <<< "$(estimate_characters)"
         if (( chars > 0 )); then
-            requests=$(wc -l < "$GROUP_FILE" | tr -d ' ')
             log "Asking ElevenLabs what this will cost..."
-            log "ElevenLabs will be sent $(el_count "$requests" request)."
+            if [[ -n $PACK_FILES ]]; then
+                log "Up to $(el_count "$requests" announcement) that voice pack $EL_PACK can't have (overrides, -i, -P or custom text) will be spoken with ElevenLabs."
+            else
+                log "ElevenLabs will be sent $(el_count "$requests" request)."
+            fi
             el_cost_report "$chars"
             # Each request takes about a second, so a full build runs for hours.
             if (( requests * 12 / 10 / JOBS >= 600 )); then
@@ -957,6 +1082,8 @@ confirm_processing() {
                 log "Run it where it won't be interrupted, for example in screen or tmux,"
                 log "or with nohup. If it is stopped, run it again with -a to finish."
             fi
+        elif [[ -n $PACK_FILES ]]; then
+            log "The announcements come from voice pack $EL_PACK: no ElevenLabs credits are used."
         elif (( JOIN )); then
             log "The announcements are joined from the telemetry sounds: no ElevenLabs credits are used."
         fi
@@ -1060,8 +1187,11 @@ run_parallel() {
     total="$(wc -l < "$WORK_FILE" | tr -d ' ')"
     [[ -s $GROUP_FILE ]] || group_work
     groups="$(wc -l < "$GROUP_FILE" | tr -d ' ')"
-    (( groups < total )) \
-        && log "$total nodes say $groups different things: rendering $groups announcements, the rest are shared."
+    if [[ -n $PACK_FILES ]]; then
+        log "Linking $total nodes to the announcements of voice pack $EL_PACK..."
+    elif (( groups < total )); then
+        log "$total nodes say $groups different things: rendering $groups announcements, the rest are shared."
+    fi
 
     if command -v parallel >/dev/null 2>&1; then
         # --will-cite: skip the one-time citation prompt/notice.
@@ -1080,8 +1210,25 @@ run_parallel() {
                     shift 5
                 done
               ' _
-    fi | if [[ $ENGINE == elevenlabs && $JOIN == 1 ]]; then join_writer; else cat; fi \
+    fi | if [[ $ENGINE == elevenlabs ]] && [[ $JOIN == 1 || -n $PACK_FILES ]]; then join_writer; else cat; fi \
        | report_progress "$total"
+}
+
+# Voice pack: the nodes still joined for want of the pack's announcement
+# are the ones joined this run, and those from before that this run didn't
+# look at.
+save_pending() {
+    [[ -n $PENDING_SAVED ]] || return 0
+    local tmp=$PENDING_SAVED.tmp.$$
+    {
+        cat -- "$PENDING_FILE"
+        if [[ -f $PENDING_SAVED ]]; then
+            awk -F'|' 'FNR == NR { done[$1] = 1; next } !($1 in done)' "$WORK_FILE" "$PENDING_SAVED"
+        fi
+    } | sort -un > "$tmp" && mv -f -- "$tmp" "$PENDING_SAVED" || rm -f -- "$tmp"
+    if [[ -s $PENDING_SAVED ]]; then
+        log "$(el_count "$(wc -l < "$PENDING_SAVED")" node) joined from the telemetry sounds until voice pack $EL_PACK has the call sign (usually by the next day)."
+    fi
 }
 
 update_previous_db() {
@@ -1206,25 +1353,54 @@ if [[ $ENGINE == elevenlabs ]]; then
         el_defaults
         [[ $JOIN == 1 ]] || die "$EL_CONF not found. Run "sudo asl-telem-setup.sh" (or install.sh) and choose ElevenLabs to set it up."
     fi
+    if [[ -z $JOIN && $EL_NODE_METHOD == pack ]]; then
+        JOIN=0
+        [[ -n $EL_PACK ]] || die "NODE_METHOD=pack but no PACK is set in $EL_CONF. Run "sudo asl-telem-setup.sh" to choose a voice pack."
+        # Bring the pack (and its telemetry prompts) up to date. Without
+        # the internet, the copy already here is used.
+        if [[ -z $SINGLE_NODE ]]; then
+            # Quiet in cron; on a terminal the downloads are shown.
+            "$SCRIPT_DIR/elevenlabs-pack.sh" sync $( [[ -t 1 ]] || echo -q ) \
+                || log "WARNING: voice pack $EL_PACK could not be brought up to date (see above). Using the copy already here."
+            el_load_config || die "Could not read $EL_CONF"
+        fi
+        PACK_FILES=$EL_PACK_ROOT/$EL_PACK/files
+        [[ -f $EL_PACK_ROOT/$EL_PACK/index.tsv ]] \
+            || die "Voice pack $EL_PACK is not downloaded. Run: sudo elevenlabs-pack.sh sync"
+        el_configured && PACK_KEY=1
+        PENDING_SAVED=$EL_PACK_ROOT/$EL_PACK/pending-$(printf '%s' "$(readlink -f "$DESTDIR")" | md5sum | cut -c 1-8).txt
+        if [[ -f $PENDING_SAVED ]]; then
+            while IFS= read -r node; do
+                [[ -n $node ]] && PACK_PENDING[$node]=1
+            done < "$PENDING_SAVED"
+        fi
+    fi
     [[ -n $JOIN ]] || { [[ $EL_NODE_METHOD == join ]] && JOIN=1 || JOIN=0; }
-    if (( JOIN )); then
+    if (( JOIN )) || [[ -n $PACK_FILES ]]; then
         for f in letters/a digits/0 phonetic/a_p rpt/node; do
             [[ -f $SOUNDS_DIR/$f.ul ]] \
                 || die "$SOUNDS_DIR/$f.ul not found. -J joins the telemetry sounds: run elevenlabs-telemetry.sh first."
         done
     fi
-    # -t text is spoken by ElevenLabs even when joining.
-    if (( ! JOIN )) || (( ${#CUSTOM_TEXT[@]} )); then
+    # -t text is spoken by ElevenLabs even when joining. A voice pack
+    # needs no key: what it would speak is joined instead.
+    if [[ -n $PACK_FILES ]]; then
+        (( PACK_KEY )) && ! command -v curl > /dev/null 2>&1 && die "curl is required to reach ElevenLabs"
+    elif (( ! JOIN )) || (( ${#CUSTOM_TEXT[@]} )); then
         el_configured || die "$EL_CONF has no API_KEY or VOICE_ID. Run "sudo asl-telem-setup.sh" to set them."
         command -v curl >/dev/null 2>&1 || die "curl is required to reach ElevenLabs"
     fi
     if [[ -z $JOBS ]]; then
-        if (( JOIN )); then JOBS="$(nproc 2>/dev/null || echo 4)"; else JOBS=$EL_JOBS; fi
+        if (( JOIN )) || [[ -n $PACK_FILES ]]; then JOBS="$(nproc 2>/dev/null || echo 4)"; else JOBS=$EL_JOBS; fi
     fi
     # On a terminal the progress line is redrawn in place, so frequent
     # updates cost nothing; in a log (cron) they would be thousands of lines.
-    (( ! JOIN )) && [[ -t 1 ]] && PROGRESS_EVERY=$PROGRESS_EVERY_SPEAK
-    vlog "Using ElevenLabs voice ${EL_VOICE_NAME:-$EL_VOICE_ID} ($( (( JOIN )) && echo "joined sounds" || echo "one request per announcement"))"
+    (( ! JOIN )) && [[ -z $PACK_FILES ]] && [[ -t 1 ]] && PROGRESS_EVERY=$PROGRESS_EVERY_SPEAK
+    if [[ -n $PACK_FILES ]]; then
+        vlog "Using voice pack $EL_PACK (${EL_VOICE_NAME:-$EL_VOICE_ID})"
+    else
+        vlog "Using ElevenLabs voice ${EL_VOICE_NAME:-$EL_VOICE_ID} ($( (( JOIN )) && echo "joined sounds" || echo "one request per announcement"))"
+    fi
 else
     [[ -x "$SAY" ]] || die "DECtalk say command not found at $SAY"
     if [[ -f "$INIT_CFG" ]]; then
@@ -1235,7 +1411,8 @@ else
 fi
 
 ensure_directory_exists "$DESTDIR"
-export SAY DECTALK_INIT INCNODE PHONETIC DESTDIR VERBOSE ENGINE JOIN SOUNDS_DIR
+PENDING_FILE=$(mktemp)
+export SAY DECTALK_INIT INCNODE PHONETIC DESTDIR VERBOSE ENGINE JOIN SOUNDS_DIR PACK_FILES PACK_KEY PENDING_FILE
 
 # Reading and checking tens of thousands of nodes takes a while on a slow
 # system (about a minute on a Raspberry Pi 4), so say what is going on.
@@ -1247,7 +1424,7 @@ CHANGES_FILE="$(mktemp)"
 GROUP_FILE="$(mktemp)"
 ENTRIES_FILE="$(mktemp)"
 STOP_FILE="$(mktemp -u)"
-cleanup() { rm -f "$WORK_FILE" "$CHANGES_FILE" "$GROUP_FILE" "$ENTRIES_FILE" "$STOP_FILE"; }
+cleanup() { rm -f "$WORK_FILE" "$CHANGES_FILE" "$GROUP_FILE" "$ENTRIES_FILE" "$STOP_FILE" "$PENDING_FILE"; }
 trap cleanup EXIT
 export STOP_FILE
 # queue_node writes a line to each for every node: keep them open rather
@@ -1294,7 +1471,8 @@ else
         fi
 
         # Incremental: only new or changed callsigns and overrides.
-        if [[ -n "$old" && "$old" == "$callsign" ]] && ! override_changed "$node" "$callsign"; then
+        if [[ -n "$old" && "$old" == "$callsign" ]] && [[ -z ${PACK_PENDING[$node]+x} ]] \
+            && ! override_changed "$node" "$callsign"; then
             continue
         fi
         if needs_rebuild "$node" "$callsign"; then
@@ -1347,6 +1525,7 @@ for node in "${REMOVE_NODES[@]}"; do
     rm -f "$DESTDIR/$node.ulaw" && log "Deleted the announcement for node $node"
 done
 (( node_count )) && run_parallel
+save_pending
 if [[ -z "$SINGLE_NODE" ]]; then
     update_previous_db
     save_override_snapshot

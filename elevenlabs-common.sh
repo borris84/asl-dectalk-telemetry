@@ -19,8 +19,13 @@
 #   STABILITY, SIMILARITY  optional voice settings (0 to 1); the voice's
 #               own settings are used when they are not set
 #   NODE_METHOD join (node names are joined from the telemetry letter and
-#               digit sounds: free, the default) or speak (each node name
-#               is one request: more natural, but uses credits)
+#               digit sounds: free, the default), speak (each node name
+#               is one request: more natural, but uses credits) or pack
+#               (node names and telemetry come ready-made from the voice
+#               pack PACK: free, and needs no API key)
+#   PACK        the ready-made voice pack used (callum, sarah, daniel or
+#               alice); VOICE_ID and the other voice settings are the
+#               pack's, so your own announcements are in the same voice
 #   JOBS        requests sent at once (default 2)
 #   API_URL     default https://api.elevenlabs.io
 #
@@ -35,10 +40,16 @@ if [[ -z ${EL_CONF:-} ]]; then
     [[ ! -e $EL_CONF && -e /opt/asl-telem/elevenlabs.conf ]] && EL_CONF=/opt/asl-telem/elevenlabs.conf
 fi
 EL_KEYS_URL=https://elevenlabs.io/app/settings/api-keys
+# The ready-made voice packs: published as GitHub releases tagged
+# pack-NAME, described by packs/NAME.conf beside the scripts, and kept on
+# the node in EL_PACK_ROOT/NAME by elevenlabs-pack.sh.
+EL_PACK_REPO=borris84/asl-dectalk-telemetry
+EL_PACK_URL=https://github.com/$EL_PACK_REPO/releases/download
+EL_PACK_ROOT=/var/lib/asl-telem/packs
 EL_DEFAULT_MODEL=eleven_v4_turbo
 EL_TARGET_RMS=-24
 EL_SILENCE=-50dB
-EL_CONF_KEYS=(API_KEY VOICE_ID VOICE_NAME MODEL_ID LANGUAGE SPEED STABILITY SIMILARITY NODE_METHOD JOBS API_URL)
+EL_CONF_KEYS=(API_KEY VOICE_ID VOICE_NAME MODEL_ID LANGUAGE SPEED STABILITY SIMILARITY NODE_METHOD PACK JOBS API_URL)
 
 # Read elevenlabs.conf into EL_API_KEY, EL_VOICE_ID and so on. Values are
 # taken literally: the file is never run as shell code. Returns 1 if the
@@ -89,6 +100,43 @@ el_save_config() {
         done
     } > "$tmp" && chmod 600 -- "$tmp" && mv -f -- "$tmp" "$EL_CONF" \
         || { rm -f -- "$tmp"; return 1; }
+}
+
+# --- Ready-made voice packs ---------------------------------------------------
+
+# el_pack_value FILE KEY  - print KEY's value in a pack.conf FILE.
+el_pack_value() {
+    sed -nE "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*\$/\\1/p" "$1" 2> /dev/null | head -n 1
+}
+
+# el_pack_list  - print "name<TAB>voice id<TAB>voice name<TAB>accent<TAB>gender"
+# for each pack described in SCRIPT_DIR/packs: American before British,
+# male before female.
+el_pack_list() {
+    local f
+    for f in "$SCRIPT_DIR"/packs/*.conf; do
+        [[ -f $f ]] || continue
+        printf '%s\t%s\t%s\t%s\t%s\n' "$(el_pack_value "$f" PACK)" "$(el_pack_value "$f" VOICE_ID)" \
+            "$(el_pack_value "$f" VOICE_NAME)" "$(el_pack_value "$f" ACCENT)" "$(el_pack_value "$f" GENDER)"
+    done | sort -t$'\t' -k4,4 -k5,5r
+}
+
+# el_use_pack NAME  - take the voice settings of pack NAME (packs/NAME.conf,
+# or the downloaded copy) into the EL_* settings, with NODE_METHOD=pack.
+# Returns 1 if the pack is unknown.
+el_use_pack() {
+    local conf=$SCRIPT_DIR/packs/$1.conf
+    [[ -f $EL_PACK_ROOT/$1/pack.conf ]] && conf=$EL_PACK_ROOT/$1/pack.conf
+    [[ -f $conf ]] || return 1
+    EL_PACK=$1
+    EL_VOICE_ID=$(el_pack_value "$conf" VOICE_ID)
+    EL_VOICE_NAME=$(el_pack_value "$conf" VOICE_NAME)
+    EL_MODEL_ID=$(el_pack_value "$conf" MODEL_ID)
+    EL_LANGUAGE=$(el_pack_value "$conf" LANGUAGE)
+    EL_SPEED=$(el_pack_value "$conf" SPEED)
+    EL_STABILITY="" EL_SIMILARITY=""
+    EL_NODE_METHOD=pack
+    el_defaults
 }
 
 # Return 0 if the configuration has what is needed to speak.

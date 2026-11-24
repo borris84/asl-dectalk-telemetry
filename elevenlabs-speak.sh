@@ -291,6 +291,9 @@ command -v curl > /dev/null || die "curl is required to reach ElevenLabs"
     die "$EL_CONF not found. Run "sudo asl-telem-setup.sh" (or install.sh) and choose ElevenLabs to set it up."
 }
 el_load_config
+if [[ -z $EL_API_KEY && -n $EL_PACK ]]; then
+    die "Speaking your own text needs an ElevenLabs API key (a free plan is enough). Voice pack $EL_PACK covers only the node names and telemetry. Add a key with: sudo asl-telem-setup.sh"
+fi
 [[ -n $EL_API_KEY ]] || die "$EL_CONF has no API_KEY. Run "sudo asl-telem-setup.sh" to set it."
 
 if (( LIST_VOICES )); then

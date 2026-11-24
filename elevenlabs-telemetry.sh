@@ -87,6 +87,13 @@ fi
 . "$SCRIPT_DIR/elevenlabs-common.sh"
 el_load_config || die "$EL_CONF not found. Run "sudo asl-telem-setup.sh" (or install.sh) and choose ElevenLabs to set it up."
 [[ -n $EL_API_KEY ]] || EL_API_KEY=${ELEVENLABS_API_KEY:-}
+if [[ -z $EL_API_KEY && -n $EL_PACK ]] && (( ! CUSTOM_OUT )); then
+    echo "The telemetry prompts come ready-made from voice pack $EL_PACK, so there is"
+    echo "nothing to make: \"sudo elevenlabs-pack.sh sync\" installs or updates them"
+    echo "(write_node_callsigns_elevenlabs.sh does that on every run). An API key"
+    echo "is only needed to make prompts you have changed in $PROMPT_LIST."
+    exit 0
+fi
 el_configured || die "$EL_CONF has no API_KEY or VOICE_ID. Run "sudo asl-telem-setup.sh" to set them."
 JOBS=${JOBS:-$EL_JOBS}
 

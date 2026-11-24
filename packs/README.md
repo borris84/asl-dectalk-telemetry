@@ -35,10 +35,23 @@ Each pack is a GitHub release, tagged `pack-NAME`, with these assets:
   settings sees them as up to date and makes none of them again.
 - `telemetry.tsv`: a copy of that manifest, to check for changes without
   downloading the archive.
+- `preview.ul`: a short sample of the voice, which the installer can play
+  before the voice is chosen (`pack-tool.sh preview`).
 
 There is one file per distinct text, not one per node: nodes with the same
 call sign share it, so a node is added by hard-linking `NODE.ulaw` to its
 text's file. A new node with a known call sign needs nothing new.
+
+## On a node
+
+Choosing a ready-made voice in the installer sets `NODE_METHOD=pack` and
+`PACK=NAME` in `elevenlabs.conf`. `elevenlabs-pack.sh sync`, which
+`write_node_callsigns_elevenlabs.sh` runs first, downloads `index.tsv` and
+the archives holding the announcements the node lacks into
+`/var/lib/asl-telem/packs/NAME/files`, and installs the telemetry prompts
+that are new or changed. The node script then hard-links each node's
+announcement to the file for its text, or joins it from the telemetry
+sounds until the pack has it. See "Ready-made voices" in the main README.
 
 ## Keeping the packs up to date
 

@@ -21,6 +21,8 @@
 #                        in the same voice, laid out as the sounds/custom
 #                        folder, with the .elevenlabs-prompts manifest
 #   telemetry.tsv        a copy of that manifest
+#   preview.ul           a short sample of the voice, which the installer
+#                        plays so the voice can be heard before choosing it
 # A node downloads index.tsv, works out which files it lacks, and fetches
 # only the archives that hold them.
 #
@@ -81,6 +83,8 @@ Usage: pack-tool.sh COMMAND ...
                                .elevenlabs-prompts) that were made with the
                                pack's exact settings, so they aren't made
                                again.
+  preview DIR                  Make and publish preview.ul, a short
+                               sample of the voice
   link DIR TEXTS NODENAMES     Hard-link NODENAMES/<node>.ulaw to the
                                pack's file for each node in TEXTS
   status DIR                   Show what the pack holds
@@ -439,6 +443,27 @@ cmd_telemetry() {
     return $rc
 }
 
+# What preview.ul says: a node name as the pack says one, then telemetry.
+PREVIEW_TEXT="W 1 A W. Connected to node 2 0 0 0. The time is 3:15 PM. All links disconnected."
+
+cmd_preview() {
+    local dir=$1 name tag
+    check_dir "$dir"
+    need gh curl perl
+    name=$(conf_value "$dir/pack.conf" PACK)
+    tag=pack-$name
+    gh release view "$tag" --repo "$REPO" > /dev/null 2>&1 || die "pack $name is not published yet: publish it first"
+    SCRIPT_DIR=$REPO_DIR
+    EL_CONF=$dir/pack.conf
+    # shellcheck source=../elevenlabs-common.sh
+    . "$REPO_DIR/elevenlabs-common.sh"
+    el_load_config || die "could not read $EL_CONF"
+    EL_API_KEY=$(api_key) || die "no API key: set ELEVENLABS_API_KEY"
+    el_render "$PREVIEW_TEXT" "$dir/preview.ul" || die "could not make the preview: $EL_ERROR"
+    gh release upload "$tag" --repo "$REPO" --clobber "$dir/preview.ul" || die "could not upload preview.ul"
+    echo "Published preview.ul to $tag."
+}
+
 # link DIR TEXTS NODENAMES  - point NODENAMES/<node>.ulaw at the pack's
 # file for each node in TEXTS, as a hard link (a copy if DIR is on another
 # filesystem). Each link is made under a temp name and renamed, so a node
@@ -494,6 +519,7 @@ case $cmd in
     publish) (( $# == 1 )) || { usage >&2; exit 1; }; cmd_publish "$@" ;;
     compact) (( $# == 1 )) || { usage >&2; exit 1; }; cmd_compact "$@" ;;
     telemetry) cmd_telemetry "$@" ;;
+    preview) (( $# == 1 )) || { usage >&2; exit 1; }; cmd_preview "$@" ;;
     link) (( $# == 3 )) || { usage >&2; exit 1; }; cmd_link "$@" ;;
     status) (( $# == 1 )) || { usage >&2; exit 1; }; cmd_status "$@" ;;
     -h|--help|help) usage ;;
