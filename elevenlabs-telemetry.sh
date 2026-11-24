@@ -13,6 +13,11 @@
 # ElevenLabs charges for every request, so a prompt is only sent again
 # when its text or the voice settings have changed since it was made
 # (or with -r).
+#
+# With -o DIR the prompts are written to DIR instead, which needs neither
+# root nor ASL3: packs/pack-tool.sh uses it to make a pack's telemetry,
+# with EL_CONF naming the pack's settings and the key in
+# ELEVENLABS_API_KEY.
 
 set -u
 set -o pipefail
@@ -36,7 +41,7 @@ die() {
 
 usage() {
     cat << EOF
-Usage: elevenlabs-telemetry.sh [-r] [-f] [-j N]
+Usage: elevenlabs-telemetry.sh [-r] [-f] [-j N] [-o DIR]
 
 Make the telemetry prompts in $PROMPT_LIST
 with ElevenLabs, using the voice in elevenlabs.conf.
@@ -45,15 +50,18 @@ with ElevenLabs, using the voice in elevenlabs.conf.
    -f     Don't ask: use the existing sounds folder and don't ask before
           spending credits
    -j N   Requests to send at once (default: JOBS in elevenlabs.conf, or 2)
+   -o DIR Write the prompts to DIR instead of $OUT_DIR
    -h     Show this message
 EOF
 }
 
-while getopts ":rfj:h" opt; do
+CUSTOM_OUT=0
+while getopts ":rfj:o:h" opt; do
     case $opt in
         r) REBUILD=1 ;;
         f) ASSUME_YES=1 ;;
         j) JOBS=$OPTARG ;;
+        o) OUT_DIR=$OPTARG; CUSTOM_OUT=1 ;;
         h) usage; exit 0 ;;
         :) usage >&2; die "-$OPTARG needs a value" ;;
         *) usage >&2; die "Unknown option: -$OPTARG" ;;
@@ -65,12 +73,12 @@ shift $((OPTIND - 1))
 
 # --- Preflight -------------------------------------------------------------
 
-if [ "$(id -u)" -ne 0 ]; then
+if (( ! CUSTOM_OUT )) && [ "$(id -u)" -ne 0 ]; then
     echo "WARNING: this script requires root. Re-run it as root (e.g. with sudo)." >&2
     exit 1
 fi
 
-if ! dpkg-query -W -f='${Status}' asl3 2>/dev/null | grep -q 'install ok installed'; then
+if (( ! CUSTOM_OUT )) && ! dpkg-query -W -f='${Status}' asl3 2>/dev/null | grep -q 'install ok installed'; then
     die "ASL3 is not installed (package 'asl3' not found). Nothing done."
 fi
 
@@ -78,10 +86,11 @@ fi
 # shellcheck source=elevenlabs-common.sh
 . "$SCRIPT_DIR/elevenlabs-common.sh"
 el_load_config || die "$EL_CONF not found. Run "sudo asl-telem-setup.sh" (or install.sh) and choose ElevenLabs to set it up."
+[[ -n $EL_API_KEY ]] || EL_API_KEY=${ELEVENLABS_API_KEY:-}
 el_configured || die "$EL_CONF has no API_KEY or VOICE_ID. Run "sudo asl-telem-setup.sh" to set them."
 JOBS=${JOBS:-$EL_JOBS}
 
-for cmd in ffmpeg curl perl md5sum; do
+for cmd in curl perl md5sum; do
     command -v "$cmd" > /dev/null || die "$cmd is required but was not found"
 done
 [ -r "$PROMPT_LIST" ] || die "prompt list not found: $PROMPT_LIST"

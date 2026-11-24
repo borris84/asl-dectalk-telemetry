@@ -17,12 +17,17 @@
 #   index.tsv            "md5<TAB>text<TAB>archive" for every announcement
 #   base.tar.xz          the first full build
 #   delta-<time>.tar.xz  announcements added later
+#   telemetry.tar.xz     the telemetry prompts (elevenlabs-prompt-list.txt)
+#                        in the same voice, laid out as the sounds/custom
+#                        folder, with the .elevenlabs-prompts manifest
+#   telemetry.tsv        a copy of that manifest
 # A node downloads index.tsv, works out which files it lacks, and fetches
 # only the archives that hold them.
 #
 # The local working copy of a pack (DIR) has pack.conf, index.tsv and
 # files/<md5>.ulaw for the announcements not yet published, which are
-# listed in index.tsv with "-" as their archive.
+# listed in index.tsv with "-" as their archive, and telemetry/ for the
+# telemetry prompts.
 
 set -u
 set -o pipefail
@@ -67,6 +72,15 @@ Usage: pack-tool.sh COMMAND ...
                                if the pack has none, else as a delta
   compact NAME                 Merge the delta archives into one once there
                                are more than $MAX_DELTAS
+  telemetry [-j N] [-i SOUNDS] DIR
+                               Make the telemetry prompts the pack lacks, or
+                               whose text has changed, with
+                               elevenlabs-telemetry.sh, and publish them as
+                               telemetry.tar.xz. -i first takes the prompts
+                               in a sounds folder (with its
+                               .elevenlabs-prompts) that were made with the
+                               pack's exact settings, so they aren't made
+                               again.
   link DIR TEXTS NODENAMES     Hard-link NODENAMES/<node>.ulaw to the
                                pack's file for each node in TEXTS
   status DIR                   Show what the pack holds
@@ -81,6 +95,13 @@ need() {
 # conf_value FILE KEY
 conf_value() {
     sed -nE "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*\$/\\1/p" "$1" | head -n 1
+}
+
+# The ElevenLabs API key: ELEVENLABS_API_KEY, or else the node's own.
+api_key() {
+    local key=${ELEVENLABS_API_KEY:-}
+    [[ -n $key ]] || key=$(conf_value /opt/asl-telem/elevenlabs.conf API_KEY 2> /dev/null)
+    [[ -n $key ]] && printf '%s' "$key"
 }
 
 check_dir() {
@@ -207,9 +228,7 @@ cmd_render() {
     # shellcheck source=../elevenlabs-common.sh
     . "$REPO_DIR/elevenlabs-common.sh"
     el_load_config || die "could not read $EL_CONF"
-    EL_API_KEY=${ELEVENLABS_API_KEY:-}
-    [[ -n $EL_API_KEY ]] || EL_API_KEY=$(conf_value /opt/asl-telem/elevenlabs.conf API_KEY 2> /dev/null)
-    [[ -n $EL_API_KEY ]] || die "no API key: set ELEVENLABS_API_KEY"
+    EL_API_KEY=$(api_key) || die "no API key: set ELEVENLABS_API_KEY"
     export EL_API_KEY
 
     todo=$(mktemp) || die "could not create a temporary file"
@@ -357,6 +376,69 @@ cmd_compact() {
     echo "Merged ${#deltas[@]} delta archives of pack $name into $archive."
 }
 
+cmd_telemetry() {
+    local jobs=2 from="" opt OPTIND=1
+    while getopts ":j:i:" opt; do
+        case $opt in
+            j) jobs=$OPTARG ;;
+            i) from=$OPTARG ;;
+            *) usage >&2; exit 1 ;;
+        esac
+    done
+    shift $((OPTIND - 1))
+    (( $# == 1 )) || { usage >&2; exit 1; }
+    [[ $jobs =~ ^[1-9][0-9]*$ ]] || die "-j must be a number"
+    local dir=$1 name tag tdir manifest key before published rc=0
+    check_dir "$dir"
+    need gh tar xz md5sum
+    name=$(conf_value "$dir/pack.conf" PACK)
+    tag=pack-$name
+    tdir=$(cd "$dir" && pwd)/telemetry
+    manifest=$tdir/.elevenlabs-prompts
+    gh release view "$tag" --repo "$REPO" > /dev/null 2>&1 || die "pack $name is not published yet: publish it first"
+    published=$(gh release view "$tag" --repo "$REPO" --json assets \
+        --jq '.assets[].name | select(. == "telemetry.tar.xz")') || die "could not read release $tag"
+    mkdir -p "$tdir" || die "could not create $tdir"
+
+    # Start from what is published, so only new or changed prompts are made.
+    if [[ ! -f $manifest && -n $published ]]; then
+        gh release download "$tag" --repo "$REPO" --dir "$dir" --clobber --pattern telemetry.tar.xz \
+            && tar -C "$tdir" -xJf "$dir/telemetry.tar.xz" || die "could not fetch the published telemetry"
+        rm -f -- "$dir/telemetry.tar.xz"
+    fi
+    if [[ -n $from ]]; then
+        [[ -f $from/.elevenlabs-prompts ]] || die "$from has no .elevenlabs-prompts"
+        (cd "$from" && cut -f1 .elevenlabs-prompts | sed 's/$/.ul/' | while IFS= read -r f; do
+            [[ ! -f $f ]] || cp --parents -- "$f" "$tdir/" || exit 1
+        done) || die "could not copy the prompts from $from"
+        # Prompts imported here are only kept if elevenlabs-telemetry.sh
+        # agrees they were made from the same text and settings.
+        cp -- "$from/.elevenlabs-prompts" "$manifest" || die "could not copy the manifest"
+    fi
+    before=$(cat -- "$manifest" 2> /dev/null | md5sum)
+
+    key=$(api_key) || die "no API key: set ELEVENLABS_API_KEY"
+    EL_CONF=$dir/pack.conf ELEVENLABS_API_KEY=$key \
+        "$REPO_DIR/elevenlabs-telemetry.sh" -f -j "$jobs" -o "$tdir" || rc=1
+    [[ -f $manifest ]] || die "no telemetry prompts were made"
+
+    if [[ -n $published && $(md5sum < "$manifest") == "$before" && -z $from ]]; then
+        echo "Pack $name: telemetry unchanged."
+        return $rc
+    fi
+    # Every prompt file goes in, even one whose new version failed: the
+    # old one is better than none, and the manifest says it is out of date.
+    (cd "$tdir" && { echo .elevenlabs-prompts; find . -name '*.ul' -printf '%P\n' | sort; } > ../telemetry.list) \
+        && tar -C "$tdir" --owner=0 --group=0 --mode=644 -cf - -T "$dir/telemetry.list" \
+            | xz -6 -T0 > "$dir/telemetry.tar.xz" \
+        && cp -- "$manifest" "$dir/telemetry.tsv" || die "could not make telemetry.tar.xz"
+    gh release upload "$tag" --repo "$REPO" --clobber "$dir/telemetry.tar.xz" "$dir/telemetry.tsv" \
+        || die "could not upload the telemetry"
+    echo "Published $(( $(wc -l < "$dir/telemetry.list") - 1 )) telemetry prompts to $tag."
+    rm -f -- "$dir/telemetry.tar.xz" "$dir/telemetry.list"
+    return $rc
+}
+
 # link DIR TEXTS NODENAMES  - point NODENAMES/<node>.ulaw at the pack's
 # file for each node in TEXTS, as a hard link (a copy if DIR is on another
 # filesystem). Each link is made under a temp name and renamed, so a node
@@ -411,6 +493,7 @@ case $cmd in
     render) cmd_render "$@" ;;
     publish) (( $# == 1 )) || { usage >&2; exit 1; }; cmd_publish "$@" ;;
     compact) (( $# == 1 )) || { usage >&2; exit 1; }; cmd_compact "$@" ;;
+    telemetry) cmd_telemetry "$@" ;;
     link) (( $# == 3 )) || { usage >&2; exit 1; }; cmd_link "$@" ;;
     status) (( $# == 1 )) || { usage >&2; exit 1; }; cmd_status "$@" ;;
     -h|--help|help) usage ;;

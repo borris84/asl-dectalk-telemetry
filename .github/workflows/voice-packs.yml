@@ -3,7 +3,9 @@
 # Every day, before nodes update their own node names at 3:00 (US
 # Eastern), download the AllStarLink node list and, for every pack that
 # has been published (a pack-NAME release), make the announcements for
-# call signs it doesn't have yet and publish them as a delta archive. See
+# call signs it doesn't have yet and publish them as a delta archive.
+# Telemetry prompts that are new or changed in elevenlabs-prompt-list.txt
+# are made and published too, also when that file changes on main. See
 # packs/pack-tool.sh.
 #
 # Needs the repository secret ELEVENLABS_API_KEY.
@@ -18,6 +20,9 @@ name: Voice pack updates
 on:
   schedule:
     - cron: "30 6 * * *"
+  push:
+    branches: [main]
+    paths: [elevenlabs-prompt-list.txt]
   workflow_dispatch:
     inputs:
       max:
@@ -85,6 +90,7 @@ jobs:
             echo "::group::Pack $name"
             dir=work/$name
             if packs/pack-tool.sh fetch "$name" "$dir" \
+              && { packs/pack-tool.sh telemetry -j 2 "$dir" || status=1; true; } \
               && { packs/pack-tool.sh render -y -j 2 -m "$MAX" "$dir" work/texts.tsv || status=1; true; } \
               && packs/pack-tool.sh publish "$dir" \
               && packs/pack-tool.sh compact "$name"; then
