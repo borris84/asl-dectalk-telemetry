@@ -29,6 +29,11 @@
 #     no node number) share one file: it is rendered once and the other
 #     nodes' files are hard links to it
 #   - Resume-safe: skip existing .ulaw unless callsign changed or -r
+#   - The settings the node names were made with are kept in
+#     DESTDIR/.asl-telem-settings: after a change of voice, voice pack or
+#     DECtalk rate they are all made again, and a remake that was stopped
+#     carries on where it was (one that would use ElevenLabs credits only
+#     from a terminal, never from cron)
 #   - Durable previous-db beside astdb.txt (not /tmp)
 #   - Auto-locate astdb in /var/lib/asterisk or /var/log/asterisk
 #   - Per-node overrides, saved in node-overrides.conf beside this script:
@@ -100,6 +105,9 @@ INCNODE=0
 PHONETIC=0
 FORCE_RUN=0
 FORCE_REBUILD=0
+REMAKE_SINCE=0
+SETTINGS_KEEP=0
+declare -A REMADE=()
 PROCESS_ALL=0
 SINGLE_NODE=""
 LIST_ONLY=0
@@ -878,6 +886,9 @@ needs_rebuild() {
 
     (( FORCE_REBUILD )) && return 0
     [[ -f "$out" ]] || return 0
+    # Made with other settings, and not yet again since (see
+    # check_settings).
+    (( REMAKE_SINCE )) && [[ -z ${REMADE[$node]+x} ]] && return 0
     # Joined until the voice pack has it.
     [[ -n ${PACK_PENDING[$node]+x} ]] && return 0
     override_changed "$node" "$callsign" && return 0
@@ -1161,6 +1172,7 @@ report_progress() {
     done
 
     if (( shown )); then printf '\r\033[K'; fi
+    echo "$failed" > "$FAILED_FILE"
     if (( failed )); then
         log "Processed $done_count of $total nodes, $failed failed."
         (( skipped )) && log "$skipped of them were not sent, because ElevenLabs stopped accepting requests (see above)."
@@ -1234,6 +1246,110 @@ save_pending() {
     if [[ -s $PENDING_SAVED ]]; then
         log "$(el_count "$(wc -l < "$PENDING_SAVED")" node) joined from the telemetry sounds until voice pack $EL_PACK has the call sign (usually by the next day)."
     fi
+}
+
+# --- What the node names were made with ------------------------------------
+#
+# SETTINGS_FILE in DESTDIR records the settings the node names were made
+# with (MADE_WITH, and MADE_WITH_DESC to say so), so that a change of voice
+# or pack remakes them all, even if the run that should have done it was
+# stopped (installer runs pass -r only when they see the change). While a
+# remake is unfinished, REMAKING has the new settings and SINCE when it
+# started: a run with those settings again only remakes the files older
+# than that, so a stopped remake carries on where it was.
+
+# Set SETTINGS_SIG to what the announcements' sound depends on, and
+# SETTINGS_DESC to a description of it.
+node_settings() {
+    local voice ra spf
+    if [[ $ENGINE == elevenlabs ]]; then
+        voice="$EL_MODEL_ID $EL_VOICE_ID $EL_SPEED $EL_LANGUAGE ${EL_STABILITY:-} ${EL_SIMILARITY:-}"
+        if [[ -n $PACK_FILES ]]; then
+            SETTINGS_SIG="elevenlabs pack $EL_PACK"
+            SETTINGS_DESC="voice pack $EL_PACK"
+        elif (( JOIN )); then
+            SETTINGS_SIG="elevenlabs join $voice"
+            SETTINGS_DESC="the telemetry sounds of ${EL_VOICE_NAME:-$EL_VOICE_ID}, joined"
+        else
+            SETTINGS_SIG="elevenlabs speak $voice"
+            SETTINGS_DESC="ElevenLabs voice ${EL_VOICE_NAME:-$EL_VOICE_ID} ($EL_MODEL_ID, speed $EL_SPEED)"
+        fi
+    else
+        SETTINGS_SIG="dectalk $(printf '%s' "${DECTALK_INIT:-}" | md5sum | cut -c 1-32)"
+        # The speaking rate is what the installer sets; name it.
+        ra=$(grep -oE '\[:ra(te)?[[:space:]]+[0-9]+\]' <<< "${DECTALK_INIT:-}" | grep -oE '[0-9]+' | head -n 1 || true)
+        spf=$(grep -oE '\[:spf[[:space:]]+[0-9]+\]' <<< "${DECTALK_INIT:-}" | grep -oE '[0-9]+' | head -n 1 || true)
+        SETTINGS_DESC="DECtalk${ra:+ at rate $ra}${spf:+ (spf $spf)}"
+    fi
+}
+
+# settings_value KEY  - print KEY's value in SETTINGS_FILE.
+settings_value() {
+    sed -n "s/^$1=//p" "$SETTINGS_FILE" 2> /dev/null | head -n 1
+}
+
+# write_settings MADE_WITH MADE_WITH_DESC [REMAKING SINCE]
+write_settings() {
+    local tmp=$SETTINGS_FILE.tmp.$$
+    {
+        echo "# What the node names here were made with (write_node_callsigns_dectalk.sh)."
+        echo "MADE_WITH=$1"
+        echo "MADE_WITH_DESC=$2"
+        if [[ -n ${3:-} ]]; then
+            echo "REMAKING=$3"
+            echo "SINCE=$4"
+        fi
+    } > "$tmp" && mv -f -- "$tmp" "$SETTINGS_FILE" || { rm -f -- "$tmp"; log "WARNING: could not write $SETTINGS_FILE"; }
+}
+
+# Before a full run: if the node names were made with other settings, set
+# REMAKE_SINCE (and REMADE, the nodes remade since) so they are all made
+# again. A remake that would use ElevenLabs credits is only started from a
+# terminal, never by cron.
+check_settings() {
+    local made remaking since made_desc node
+    node_settings
+    [[ -f $SETTINGS_FILE ]] || return 0  # Taken to be these, once this run is done.
+    made=$(settings_value MADE_WITH)
+    made_desc=$(settings_value MADE_WITH_DESC)
+    remaking=$(settings_value REMAKING)
+    since=$(settings_value SINCE)
+    [[ $made == "$SETTINGS_SIG" && -z $remaking ]] && return 0
+
+    if [[ $ENGINE == elevenlabs && -z $PACK_FILES ]] && (( ! JOIN )) && ! [[ -t 0 && -t 1 ]]; then
+        log "WARNING: the node names were made with ${made_desc:-other settings}, not $SETTINGS_DESC."
+        log "Making them again uses ElevenLabs credits, so it isn't done here. To do it, run:"
+        log "  sudo $NAME -a"
+        SETTINGS_KEEP=1
+        return 0
+    fi
+    if [[ $remaking == "$SETTINGS_SIG" && $since =~ ^[0-9]+$ ]]; then
+        log "Carrying on making the node names again with $SETTINGS_DESC (the last run stopped before it was done)."
+        while IFS= read -r node; do
+            REMADE[$node]=1
+        done < <(find "$DESTDIR" -maxdepth 1 -name '*.ulaw' -newermt "@$since" -printf '%f\n' | sed 's/\.ulaw$//')
+    else
+        since=$(date +%s)
+        log "The node names were made with ${made_desc:-other settings}: making them all again with $SETTINGS_DESC."
+        write_settings "$made" "$made_desc" "$SETTINGS_SIG" "$since"
+    fi
+    REMAKE_SINCE=$since
+    PROCESS_ALL=1
+}
+
+# After a full run with no failures: the node names are now all made with
+# these settings. After failures, a remake stays unfinished, so the next
+# run carries on with it.
+finish_settings() {
+    local failed=$1
+    (( SETTINGS_KEEP )) && return 0
+    # No count means the run didn't get to the end.
+    [[ $failed =~ ^[0-9]+$ ]] || failed=1
+    if (( failed )); then
+        (( REMAKE_SINCE )) && log "Run it again with -a to finish making the node names with $SETTINGS_DESC."
+        return 0
+    fi
+    write_settings "$SETTINGS_SIG" "$SETTINGS_DESC"
 }
 
 update_previous_db() {
@@ -1419,6 +1535,8 @@ else
 fi
 
 ensure_directory_exists "$DESTDIR"
+SETTINGS_FILE=$DESTDIR/.asl-telem-settings
+[[ -z "$SINGLE_NODE" ]] && check_settings
 PENDING_FILE=$(mktemp)
 export SAY DECTALK_INIT INCNODE PHONETIC DESTDIR VERBOSE ENGINE JOIN SOUNDS_DIR PACK_FILES PACK_KEY PENDING_FILE
 
@@ -1432,8 +1550,14 @@ CHANGES_FILE="$(mktemp)"
 GROUP_FILE="$(mktemp)"
 ENTRIES_FILE="$(mktemp)"
 STOP_FILE="$(mktemp -u)"
-cleanup() { rm -f "$WORK_FILE" "$CHANGES_FILE" "$GROUP_FILE" "$ENTRIES_FILE" "$STOP_FILE" "$PENDING_FILE"; }
+FAILED_FILE="$(mktemp)"
+cleanup() { rm -f "$WORK_FILE" "$CHANGES_FILE" "$GROUP_FILE" "$ENTRIES_FILE" "$STOP_FILE" "$PENDING_FILE" "$FAILED_FILE"; }
 trap cleanup EXIT
+# Stopped (Ctrl-C, or the terminal closed): exit now. Carrying on would
+# record this run's work as done (the previous db and the settings the
+# node names were made with), so the nodes it didn't get to would never be
+# made. The next run picks them up.
+trap 'echo >&2; log "Stopped before the end. Run it again to finish."; exit 130' INT TERM HUP
 export STOP_FILE
 # queue_node writes a line to each for every node: keep them open rather
 # than opening them tens of thousands of times.
@@ -1522,6 +1646,7 @@ if (( node_count == 0 && ${#REMOVE_NODES[@]} == 0 )); then
     if [[ -z "$SINGLE_NODE" ]]; then
         [[ -f "$PREV_DB" ]] || update_previous_db
         save_override_snapshot
+        finish_settings 0
     fi
     end_time="$(date +%s%3N)"
     log "Total script execution time: $(format_total_time "$((end_time - start_time))")"
@@ -1537,6 +1662,11 @@ save_pending
 if [[ -z "$SINGLE_NODE" ]]; then
     update_previous_db
     save_override_snapshot
+    if (( node_count )); then
+        finish_settings "$(cat -- "$FAILED_FILE" 2> /dev/null)"
+    else
+        finish_settings 0
+    fi
 fi
 
 end_time="$(date +%s%3N)"
