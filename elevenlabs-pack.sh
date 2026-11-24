@@ -161,6 +161,7 @@ cmd_sync() {
 
     sync_telemetry "$tmp" || status=1
     sync_settings
+    remove_unused_packs
 
     if (( got )) || (( ! QUIET )); then
         echo "Voice pack $NAME ($EL_VOICE_NAME): $(( total - missing )) of $total announcements here."
@@ -225,6 +226,27 @@ sync_telemetry() {
     chmod 644 -- "$tmp/manifest" && mv -f -- "$tmp/manifest" "$manifest"
     cp -f -- "$tmp/telemetry.tsv" "$STORE/telemetry.tsv"
     echo "Installed $(el_count "$(wc -l < "$tmp/install.list")" "telemetry prompt") of voice pack $NAME in $SOUNDS_DIR."
+}
+
+# Delete the other packs downloaded here (from a voice used before) that
+# nothing uses any more: none of their files is hard-linked from a node
+# name folder. One that is still linked (its node names not made again
+# yet, or another folder made with -d) is kept, and so is one being
+# downloaded.
+remove_unused_packs() {
+    local dir name size
+    for dir in "$EL_PACK_ROOT"/*/; do
+        dir=${dir%/}
+        name=${dir##*/}
+        [[ $name != "$NAME" && $name =~ ^[a-z0-9_-]+$ && -d $dir/files && ! -L $dir ]] || continue
+        [[ -f $dir/index.tsv || -f $dir/pack.conf ]] || continue
+        [[ -z $(find "$dir/files" -maxdepth 1 -type f -links +1 -print -quit) ]] || continue
+        (
+            exec 8> "$dir/.lock" && flock -n 8 || exit 0
+            size=$(du -sm -- "$dir" 2> /dev/null | cut -f1)
+            rm -rf -- "$dir" && echo "Removed voice pack $name${size:+ ($size MB)}: nothing uses it any more."
+        )
+    done
 }
 
 # Keep the voice settings in elevenlabs.conf the pack's, so anything spoken
