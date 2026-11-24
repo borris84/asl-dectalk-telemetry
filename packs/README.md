@@ -70,7 +70,20 @@ packs/pack-tool.sh init packs/sarah.conf work/sarah
 packs/pack-tool.sh render work/sarah texts.tsv
 packs/pack-tool.sh publish work/sarah
 packs/pack-tool.sh telemetry work/sarah
+packs/pack-tool.sh preview work/sarah
 ```
+
+Nodes choose from `packs.tsv` on the `packs` release, the list of every
+`pack-NAME` release that has all its files (`pack.conf`, `index.tsv`,
+`base.tar.xz`, `telemetry.tar.xz`, `telemetry.tsv` and `preview.ul`). The
+installer and `elevenlabs-pack.sh list` download it, so a new pack can be
+chosen as soon as it is complete, without a new release of the scripts
+(without the list, they offer the `packs/*.conf` they came with). It is
+remade by `packs/pack-tool.sh catalog`, which `publish`, `telemetry` and
+`preview` run when a pack may have become complete, and the daily workflow
+runs too. To keep a new pack up to date every day, add its `packs/NAME.conf`
+on main: the workflow updates every pack that has a conf there and a
+release.
 
 `import` takes announcements that were already made with the pack's exact
 settings from a node name folder instead of making them again, and

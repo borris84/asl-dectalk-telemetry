@@ -4,9 +4,8 @@
 # Licensed under the GNU General Public License, version 2. See LICENSE.
 #
 # Download and update a ready-made ElevenLabs voice pack: every node name
-# announcement and every telemetry prompt, already made in one of four
-# ElevenLabs voices, so a node needs no API key and uses no credits for
-# them. The packs are built and kept up to date on GitHub (see
+# announcement and every telemetry prompt, already made in an ElevenLabs
+# voice, so a node needs no API key and uses no credits for them. The packs are built and kept up to date on GitHub (see
 # packs/README.md in the repository).
 #
 # The pack used is PACK in elevenlabs.conf (set by asl-telem-setup.sh).
@@ -62,6 +61,10 @@ EOF
 
 cmd_list() {
     local name id voice accent gender
+    if ! el_pack_refresh; then
+        echo "(The list of ready-made voices could not be downloaded from"
+        echo "$EL_PACK_CATALOG_URL: showing the last one known.)"
+    fi
     echo "Ready-made voices (eleven_v4_turbo, speed 1.2, call signs spelled with"
     echo "letters, no node number):"
     while IFS=$'\t' read -r name id voice accent gender; do

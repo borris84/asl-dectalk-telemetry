@@ -23,8 +23,8 @@
 #               is one request: more natural, but uses credits) or pack
 #               (node names and telemetry come ready-made from the voice
 #               pack PACK: free, and needs no API key)
-#   PACK        the ready-made voice pack used (callum, sarah, daniel or
-#               alice); VOICE_ID and the other voice settings are the
+#   PACK        the ready-made voice pack used (such as callum, sarah,
+#               daniel or alice); VOICE_ID and the other voice settings are the
 #               pack's, so your own announcements are in the same voice
 #   JOBS        requests sent at once (default 2)
 #   API_URL     default https://api.elevenlabs.io
@@ -41,11 +41,18 @@ if [[ -z ${EL_CONF:-} ]]; then
 fi
 EL_KEYS_URL=https://elevenlabs.io/app/settings/api-keys
 # The ready-made voice packs: published as GitHub releases tagged
-# pack-NAME, described by packs/NAME.conf beside the scripts, and kept on
-# the node in EL_PACK_ROOT/NAME by elevenlabs-pack.sh.
+# pack-NAME and kept on the node in EL_PACK_ROOT/NAME by elevenlabs-pack.sh.
+# The packs there are now are listed in EL_PACK_CATALOG_URL (made by
+# packs/pack-tool.sh catalog), so a new pack can be chosen without a new
+# release of the scripts. packs/NAME.conf beside the scripts lists the
+# packs there were when they were released, for when that can't be
+# downloaded.
 EL_PACK_REPO=borris84/asl-dectalk-telemetry
-EL_PACK_URL=https://github.com/$EL_PACK_REPO/releases/download
-EL_PACK_ROOT=/var/lib/asl-telem/packs
+EL_PACK_URL=${EL_PACK_URL:-https://github.com/$EL_PACK_REPO/releases/download}
+EL_PACK_CATALOG_URL=${EL_PACK_CATALOG_URL:-$EL_PACK_URL/packs/packs.tsv}
+EL_PACK_ROOT=${EL_PACK_ROOT:-/var/lib/asl-telem/packs}
+# The downloaded list, once el_pack_refresh has run.
+EL_PACK_CATALOG=""
 EL_DEFAULT_MODEL=eleven_v4_turbo
 EL_TARGET_RMS=-24
 EL_SILENCE=-50dB
@@ -109,25 +116,79 @@ el_pack_value() {
     sed -nE "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*\$/\\1/p" "$1" 2> /dev/null | head -n 1
 }
 
-# el_pack_list  - print "name<TAB>voice id<TAB>voice name<TAB>accent<TAB>gender"
-# for each pack described in SCRIPT_DIR/packs: American before British,
-# male before female.
-el_pack_list() {
-    local f
-    for f in "$SCRIPT_DIR"/packs/*.conf; do
-        [[ -f $f ]] || continue
-        printf '%s\t%s\t%s\t%s\t%s\n' "$(el_pack_value "$f" PACK)" "$(el_pack_value "$f" VOICE_ID)" \
-            "$(el_pack_value "$f" VOICE_NAME)" "$(el_pack_value "$f" ACCENT)" "$(el_pack_value "$f" GENDER)"
-    done | sort -t$'\t' -k4,4 -k5,5r
+# el_pack_catalog_valid  - return 0 if standard input is a pack list: at
+# least one line, each "name<TAB>voice id<TAB>voice name<TAB>accent<TAB>gender"
+# with a name that is safe in a file path.
+el_pack_catalog_valid() {
+    perl -ne 'exit 1 unless /^[a-z0-9_-]+\t[A-Za-z0-9]+\t[^\t\x00-\x1f]+\t[a-z]*\t[a-z]*$/; END { exit 1 unless $. }'
 }
 
-# el_use_pack NAME  - take the voice settings of pack NAME (packs/NAME.conf,
-# or the downloaded copy) into the EL_* settings, with NODE_METHOD=pack.
+# el_pack_refresh  - download the list of the packs there are now into
+# EL_PACK_CATALOG, and keep a copy in EL_PACK_ROOT/catalog.tsv for when it
+# can't be downloaded (if this may write there). Returns 1 if it couldn't
+# be downloaded or isn't valid.
+el_pack_refresh() {
+    local list
+    list=$(curl -fsSL --connect-timeout 10 --max-time 20 "$EL_PACK_CATALOG_URL" 2> /dev/null) || return 1
+    el_pack_catalog_valid <<< "$list" || return 1
+    EL_PACK_CATALOG=$list
+    if mkdir -p -- "$EL_PACK_ROOT" 2> /dev/null && [[ -w $EL_PACK_ROOT ]]; then
+        printf '%s\n' "$list" > "$EL_PACK_ROOT/catalog.tsv.new" \
+            && mv -f -- "$EL_PACK_ROOT/catalog.tsv.new" "$EL_PACK_ROOT/catalog.tsv"
+    fi
+    return 0
+}
+
+# el_pack_list  - print "name<TAB>voice id<TAB>voice name<TAB>accent<TAB>gender"
+# for each ready-made voice: American before British, male before female.
+# The list is the one el_pack_refresh downloaded, or else the last one
+# downloaded, or else the packs described in SCRIPT_DIR/packs.
+el_pack_list() {
+    local f
+    {
+        if [[ -n $EL_PACK_CATALOG ]]; then
+            printf '%s\n' "$EL_PACK_CATALOG"
+        elif [[ -f $EL_PACK_ROOT/catalog.tsv ]] && el_pack_catalog_valid < "$EL_PACK_ROOT/catalog.tsv"; then
+            cat -- "$EL_PACK_ROOT/catalog.tsv"
+        else
+            for f in "$SCRIPT_DIR"/packs/*.conf; do
+                [[ -f $f ]] || continue
+                printf '%s\t%s\t%s\t%s\t%s\n' "$(el_pack_value "$f" PACK)" "$(el_pack_value "$f" VOICE_ID)" \
+                    "$(el_pack_value "$f" VOICE_NAME)" "$(el_pack_value "$f" ACCENT)" "$(el_pack_value "$f" GENDER)"
+            done
+        fi
+    } | sort -t$'\t' -k4,4 -k5,5r
+}
+
+# el_pack_conf NAME  - print the path of pack NAME's pack.conf: the
+# downloaded copy in EL_PACK_ROOT/NAME, or else packs/NAME.conf beside the
+# scripts, or else (for a pack newer than the scripts) download it into
+# EL_PACK_ROOT/NAME. Returns 1 if there is none.
+el_pack_conf() {
+    local name=$1 dir=$EL_PACK_ROOT/$1
+    [[ $name =~ ^[a-z0-9_-]+$ ]] || return 1
+    if [[ -f $dir/pack.conf ]]; then
+        echo "$dir/pack.conf"
+    elif [[ -f $SCRIPT_DIR/packs/$name.conf ]]; then
+        echo "$SCRIPT_DIR/packs/$name.conf"
+    else
+        mkdir -p -- "$dir" 2> /dev/null || return 1
+        curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 -o "$dir/pack.conf.new" \
+            "$EL_PACK_URL/pack-$name/pack.conf" 2> /dev/null \
+            && [[ $(el_pack_value "$dir/pack.conf.new" PACK) == "$name" \
+                && $(el_pack_value "$dir/pack.conf.new" VOICE_ID) =~ ^[A-Za-z0-9]+$ ]] \
+            && mv -f -- "$dir/pack.conf.new" "$dir/pack.conf" \
+            || { rm -f -- "$dir/pack.conf.new"; rmdir -- "$dir" 2> /dev/null; return 1; }
+        echo "$dir/pack.conf"
+    fi
+}
+
+# el_use_pack NAME  - take the voice settings of pack NAME (see
+# el_pack_conf) into the EL_* settings, with NODE_METHOD=pack.
 # Returns 1 if the pack is unknown.
 el_use_pack() {
-    local conf=$SCRIPT_DIR/packs/$1.conf
-    [[ -f $EL_PACK_ROOT/$1/pack.conf ]] && conf=$EL_PACK_ROOT/$1/pack.conf
-    [[ -f $conf ]] || return 1
+    local conf
+    conf=$(el_pack_conf "$1") || return 1
     EL_PACK=$1
     EL_VOICE_ID=$(el_pack_value "$conf" VOICE_ID)
     EL_VOICE_NAME=$(el_pack_value "$conf" VOICE_NAME)

@@ -26,6 +26,14 @@
 # A node downloads index.tsv, works out which files it lacks, and fetches
 # only the archives that hold them.
 #
+# The release tagged packs has packs.tsv, the list of the packs a node can
+# choose ("name<TAB>voice id<TAB>voice name<TAB>accent<TAB>gender", from
+# each pack.conf): every pack-NAME release that has all the files above.
+# The installer and elevenlabs-pack.sh download it, so a new pack can be
+# chosen without a new release of the scripts. It is remade by catalog,
+# which publish, telemetry and preview run when a pack may have become
+# complete.
+#
 # The local working copy of a pack (DIR) has pack.conf, index.tsv and
 # files/<md5>.ulaw for the announcements not yet published, which are
 # listed in index.tsv with "-" as their archive, and telemetry/ for the
@@ -42,6 +50,10 @@ NODE_SCRIPT=$REPO_DIR/write_node_callsigns_elevenlabs.sh
 # A delta archive is merged with the others once there are this many, so
 # the release stays far below GitHub's 1000 assets.
 MAX_DELTAS=${PACK_MAX_DELTAS:-30}
+# The release that holds packs.tsv, and the files a pack release must have
+# to be listed in it.
+CATALOG_TAG=packs
+CATALOG_NEEDS=(pack.conf index.tsv base.tar.xz telemetry.tar.xz telemetry.tsv preview.ul)
 
 die() {
     echo "ERROR: $*" >&2
@@ -85,6 +97,9 @@ Usage: pack-tool.sh COMMAND ...
                                again.
   preview DIR                  Make and publish preview.ul, a short
                                sample of the voice
+  catalog                      Remake packs.tsv, the list of complete packs
+                               that nodes can choose, and publish it if it
+                               changed
   link DIR TEXTS NODENAMES     Hard-link NODENAMES/<node>.ulaw to the
                                pack's file for each node in TEXTS
   status DIR                   Show what the pack holds
@@ -344,6 +359,8 @@ cmd_publish() {
         || die "could not upload the index"
     rm -f -- "$dir/$archive"
     echo "Published $count announcements in $archive to $tag."
+    [[ $archive == base.tar.xz ]] && update_catalog
+    return 0
 }
 
 cmd_compact() {
@@ -440,6 +457,7 @@ cmd_telemetry() {
         || die "could not upload the telemetry"
     echo "Published $(( $(wc -l < "$dir/telemetry.list") - 1 )) telemetry prompts to $tag."
     rm -f -- "$dir/telemetry.tar.xz" "$dir/telemetry.list"
+    [[ -z $published ]] && update_catalog
     return $rc
 }
 
@@ -462,6 +480,70 @@ cmd_preview() {
     el_render "$PREVIEW_TEXT" "$dir/preview.ul" || die "could not make the preview: $EL_ERROR"
     gh release upload "$tag" --repo "$REPO" --clobber "$dir/preview.ul" || die "could not upload preview.ul"
     echo "Published preview.ul to $tag."
+    update_catalog
+}
+
+# catalog  - list every pack-NAME release that has all of CATALOG_NEEDS in
+# packs.tsv, and publish it to the CATALOG_TAG release if it changed.
+cmd_catalog() {
+    local work tag assets name f missing line count
+    need gh perl
+    work=$(mktemp -d) || die "could not create a temporary folder"
+    trap "rm -rf -- '$work'" EXIT
+    gh api --paginate "repos/$REPO/releases?per_page=100" \
+        --jq '.[] | select(.tag_name | startswith("pack-")) | [.tag_name, ([.assets[].name] | join(" "))] | @tsv' \
+        > "$work/releases" || die "could not list the releases of $REPO"
+    : > "$work/packs.tsv"
+    while IFS=$'\t' read -r tag assets; do
+        name=${tag#pack-}
+        missing=()
+        for f in "${CATALOG_NEEDS[@]}"; do
+            [[ " $assets " == *" $f "* ]] || missing+=("$f")
+        done
+        if (( ${#missing[@]} )); then
+            echo "Pack $name: not listed yet, it has no ${missing[*]}."
+            continue
+        fi
+        gh release download "$tag" --repo "$REPO" --pattern pack.conf --output "$work/$name.conf" \
+            || die "could not download the pack.conf of $tag"
+        [[ $(conf_value "$work/$name.conf" PACK) == "$name" ]] \
+            || { echo "Pack $name: not listed, its pack.conf has another PACK." >&2; continue; }
+        line=$(printf '%s\t%s\t%s\t%s\t%s' "$name" "$(conf_value "$work/$name.conf" VOICE_ID)" \
+            "$(conf_value "$work/$name.conf" VOICE_NAME)" "$(conf_value "$work/$name.conf" ACCENT)" \
+            "$(conf_value "$work/$name.conf" GENDER)")
+        # The same check a node makes, so one bad line can't hide the list.
+        if ! perl -ne 'exit 1 unless /^[a-z0-9_-]+\t[A-Za-z0-9]+\t[^\t\x00-\x1f]+\t[a-z]*\t[a-z]*$/' <<< "$line"; then
+            echo "Pack $name: not listed, its pack.conf has a value a node would not accept." >&2
+            continue
+        fi
+        echo "$line" >> "$work/packs.tsv"
+    done < "$work/releases"
+    sort -t$'\t' -k4,4 -k5,5r -k1,1 -o "$work/packs.tsv" "$work/packs.tsv"
+    count=$(wc -l < "$work/packs.tsv")
+    (( count )) || die "no pack is complete: nothing to list"
+
+    if gh release download "$CATALOG_TAG" --repo "$REPO" --pattern packs.tsv --output "$work/published.tsv" 2> /dev/null \
+        && cmp -s -- "$work/published.tsv" "$work/packs.tsv"; then
+        echo "The list of packs is unchanged ($count)."
+        return 0
+    fi
+    if ! gh release view "$CATALOG_TAG" --repo "$REPO" > /dev/null 2>&1; then
+        gh release create "$CATALOG_TAG" --repo "$REPO" --prerelease --latest=false \
+            --title "Ready-made voice list" \
+            --notes "packs.tsv lists the ready-made ElevenLabs voices (the pack-NAME releases) that nodes can choose. Made by packs/pack-tool.sh catalog." \
+            || die "could not create release $CATALOG_TAG"
+    fi
+    gh release upload "$CATALOG_TAG" --repo "$REPO" --clobber "$work/packs.tsv" \
+        || die "could not upload packs.tsv"
+    echo "Published the list of $count packs:"
+    cut -f1,3 "$work/packs.tsv" | sed 's/^/  /'
+}
+
+# Remake the list of packs after a pack may have become complete. A
+# failure here doesn't fail the command that ran it: the next catalog
+# (the daily workflow) tries again.
+update_catalog() {
+    ( cmd_catalog ) || echo "WARNING: could not update the list of packs. Run: packs/pack-tool.sh catalog" >&2
 }
 
 # link DIR TEXTS NODENAMES  - point NODENAMES/<node>.ulaw at the pack's
@@ -520,6 +602,7 @@ case $cmd in
     compact) (( $# == 1 )) || { usage >&2; exit 1; }; cmd_compact "$@" ;;
     telemetry) cmd_telemetry "$@" ;;
     preview) (( $# == 1 )) || { usage >&2; exit 1; }; cmd_preview "$@" ;;
+    catalog) (( $# == 0 )) || { usage >&2; exit 1; }; cmd_catalog ;;
     link) (( $# == 3 )) || { usage >&2; exit 1; }; cmd_link "$@" ;;
     status) (( $# == 1 )) || { usage >&2; exit 1; }; cmd_status "$@" ;;
     -h|--help|help) usage ;;

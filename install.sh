@@ -82,7 +82,10 @@ SCRIPTS=("$TELEM_SCRIPT" "$NODES_SCRIPT" "$SPEAK_SCRIPT"
 # Code the scripts load: always replaced, not put on the PATH.
 LIB_FILES=(elevenlabs-common.sh)
 DATA_FILES=(dec-init.cfg prompt-list.txt elevenlabs-prompt-list.txt)
-# The ready-made ElevenLabs voices (packs/NAME.conf): always replaced.
+# The ready-made ElevenLabs voices when this was released (packs/NAME.conf):
+# always replaced. The installer and elevenlabs-pack.sh download the list
+# of the packs there are now, so a newer pack can be chosen too; these are
+# for when that can't be downloaded.
 PACK_CONFS=(packs/callum.conf packs/sarah.conf packs/daniel.conf packs/alice.conf)
 # Installed only if missing: the user's own settings, never replaced.
 USER_FILES=(node-overrides.conf)
@@ -604,7 +607,7 @@ choose_engine() {
     echo "  1) DECtalk     Runs on this node: fast, free, and needs no internet"
     echo "                 connection once installed. The classic synthesized voice."
     echo "  2) ElevenLabs  Natural sounding voices from ElevenLabs' online service."
-    echo "                 Four ready-made voices need no ElevenLabs account: every"
+    echo "                 The ready-made voices need no ElevenLabs account: every"
     echo "                 node name and telemetry prompt is downloaded already made."
     echo "                 Any other voice needs an ElevenLabs plan with API access,"
     echo "                 and every sound made uses credits (announcing each node by"
@@ -759,6 +762,7 @@ choose_voice() {
     local -a vids=() vnames=()
     local -A ready=()
     local id name desc i=0 default=1 any_ready=0 pname
+    refresh_packs
     while IFS=$'\t' read -r pname id _; do ready[$id]=$pname; done < <(el_pack_list)
     echo "Voices in your ElevenLabs library:"
     while IFS=$'\t' read -r id name desc; do
@@ -906,6 +910,22 @@ step_el_voice() {
 USE_PACK=0
 PACK_PREVIEW=0
 PACK_PREVIEW_ASKED=0
+PACKS_REFRESHED=0
+
+# Download the list of the ready-made voices there are now (once), so a
+# voice published after this release is offered too.
+refresh_packs() {
+    (( PACKS_REFRESHED )) && return 0
+    PACKS_REFRESHED=1
+    el_pack_refresh && return 0
+    if [[ -f $EL_PACK_ROOT/catalog.tsv ]]; then
+        echo "(The list of ready-made voices could not be downloaded: showing the last one.)"
+    else
+        echo "(The list of ready-made voices could not be downloaded: showing the ones"
+        echo "there were in version $VERSION.)"
+    fi
+    echo
+}
 
 # Choose between the ready-made voices and a voice of your own. Sets
 # USE_PACK, and for a ready-made voice saves its settings.
@@ -917,12 +937,13 @@ step_el_source() {
     el_load_config || el_defaults
     EL_START_SIGNATURE=$(el_signature)
     start_method=$EL_NODE_METHOD
+    refresh_packs
     while IFS=$'\t' read -r name id voice accent gender; do
         names+=("$name")
         voices+=("$voice")
         descs+=("${accent^}, $gender")
     done < <(el_pack_list)
-    (( ${#names[@]} )) || die "No ready-made voices found in $SRC_DIR/packs."
+    (( ${#names[@]} )) || die "No ready-made voices found (the list could not be downloaded and $SRC_DIR/packs has none)."
     own=$(( ${#names[@]} + 1 ))
     if [[ $EL_NODE_METHOD == pack ]]; then
         for i in "${!names[@]}"; do [[ ${names[$i]} == "$EL_PACK" ]] && default=$((i + 1)); done
@@ -1443,7 +1464,7 @@ run_checks() {
         el_load_config || el_defaults
         if [[ $EL_NODE_METHOD == pack ]]; then
             check "$EL_CONF uses a ready-made voice (voice pack ${EL_PACK:-none})" \
-                '[[ -n $EL_PACK && -f $INSTALL_DIR/packs/$EL_PACK.conf ]]'
+                '[[ -n $EL_PACK && ( -f $EL_PACK_ROOT/$EL_PACK/pack.conf || -f $INSTALL_DIR/packs/$EL_PACK.conf ) ]]'
             [[ -n $EL_API_KEY ]] && check "The ElevenLabs API key works (optional)" 'el_voices 2> /dev/null'
         else
             check "$EL_CONF has an API key and a voice" el_configured
@@ -1696,7 +1717,7 @@ upgrade() {
     echo
     echo "Upgrade to $VERSION done. Existing sounds were not changed."
     if [[ $ENGINE == elevenlabs ]] && ! grep -q '^NODE_METHOD=pack' "$EL_CONF" 2> /dev/null; then
-        echo "Four ready-made ElevenLabs voices need no API key or credits: every node"
+        echo "The ready-made ElevenLabs voices need no API key or credits: every node"
         echo "name and telemetry prompt is downloaded already made. To use one, run:"
         echo "  sudo $SETUP_LINK"
     fi
@@ -1781,7 +1802,7 @@ if [[ $ENGINE == elevenlabs ]]; then
         "Install perl, curl and xz if they are missing"
         "Turn on automatic updates of the node database ($ASTDB)"
         "Copy the scripts to $INSTALL_DIR and put them on the PATH"
-        "Choose a voice: one of four ready-made voices (no API key needed), or"
+        "Choose a voice: one of the ready-made voices (no API key needed), or"
         "   one from your own ElevenLabs library (API key, model, voice and speed),"
         "   with an optional preview on your node"
         "Allow custom sounds in $ASTERISK_CONF"

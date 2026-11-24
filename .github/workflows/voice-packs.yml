@@ -102,3 +102,9 @@ jobs:
             echo "::endgroup::"
           done
           exit $status
+
+      - name: Update the list of packs
+        # packs.tsv on the packs release: the ready-made voices nodes can
+        # choose. Normally already done when a pack became complete.
+        if: always()
+        run: packs/pack-tool.sh catalog
